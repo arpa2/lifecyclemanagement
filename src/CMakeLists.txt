@@ -8,14 +8,12 @@ endif()
 
 add_definitions(-Wall -Wextra -pedantic)
 
-set(lifecyclemgt_SRC
+set(lifecycle_SRC
         lifecycle.c lifecycle.h
 )
 
-add_library (pullback_lcmgt SHARED ${lifecyclemgt_SRC})
-set_target_properties (pullback_lcmgt
-	PROPERTIES OUTPUT_NAME pulleyback_lifecyclemanagement)
+add_library (pulleyback_lifecycle SHARED ${lifecycle_SRC})
 
-install (TARGETS pullback_lcmgt
+install (TARGETS pulleyback_lifecycle
 	LIBRARY DESTINATION /usr/share/steamworks/pulleyback)
 
