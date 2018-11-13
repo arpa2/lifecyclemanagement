@@ -59,7 +59,7 @@ struct lcstate {
 // toadd becomes the new first.
 //
 struct lcobject {
-	struct lcobject *lco_next;	//TOOD// maybe??? diff timerQ / hashQ
+	struct lcobject *lco_next;	//TODO// maybe??? diff timerQ / hashQ
 	struct lcstate  *lcs_first;
 	struct lcstate  *lcs_toadd;
 	struct lcstate  *lcs_todel;

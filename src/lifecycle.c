@@ -440,8 +440,26 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
  * This tidy run of events is dirsupted by LDAP, so that step 6 need not
  * be taken care of here; LDAP changes to the lcstate would cause a restart.
  * Some clever caching of changes during LDAP transactions could be useful.
+ */
+
+
+/* When a backend instance is openened, it is given its own thread.
+ * When the backend instance is closed, the thread is taken away.
  *
- * TODO: Run an overall processor, not interfering with Pulley queries.
+ * The context of each thread is its own lcenv.  It passes lines
+ * to output drivers, multiple if need be -- LDAP can wait for us.
+ * Output drivers may be assumed to run without cross-connections, so
+ * we need not be afraid of deadlocks there either.
+ * 
+ * On a regular basis however, the thread releases its Mutex lock on
+ * lcenv, and after grabbing it again it will start from scratch.
+ * While the Mutex was held by LDAP, it may have added and deleted
+ * lcobject and lcstate representations, as the environment sees fit.
+ *
+ * The Mutex in the lcenv is claimed during transaction start, and
+ * released after transaction end, good or bad.
+ *
+ * #TODO# No LDAP and no output; how to handle the Mutex?
  */
 
 
@@ -478,7 +496,7 @@ void txn_open (struct lcenv *lce) {
 /* Break a transaction.  This recovers old state and disables any
  * further activity.
  *
- * #TODO# Release Mutex claimed by transaction
+ * #TODO# Release Mutex claimed by transaction, no pthread_cond_signal()
  */
 void txn_break (struct lcenv *lce) {
 	assert (txn_isactive (lce));
@@ -506,15 +524,16 @@ void txn_break (struct lcenv *lce) {
 /* The current transaction is done.
  * Delete what was setup for deletion, add what was prepared.
  *
- * #TODO# Release Mutex claimed by transaction
+ * #TODO# Release Mutex claimed by transaction + pthread_cond_signal()
  */
 void txn_done (struct lcenv *lce) {
 	assert (txn_isactive (lce));
 	struct lcenv *txnext;
 	while (txnext = lce->env_txncycle, txnext != NULL) {
 		lce->env_txncycle = NULL;
-		struct lcobject *lco = lce->lco_first;
-		while (lco != NULL) {
+		struct lcobject **plco = & lce->lco_first;
+		while (*plco != NULL) {
+			struct lcobject *lco = *plco;
 			struct lcstate **plcs = & lco->lcs_first;
 			struct lcstate *next;
 			while (next = *plcs, next != NULL) {
@@ -523,9 +542,15 @@ void txn_done (struct lcenv *lce) {
 			}
 			lco->lcs_first = lco->lcs_toadd;
 			lco->lcs_toadd = NULL;
-			lco = lco->lco_next;
+			if (lco->lcs_first == NULL) {
+				// Empty object.  Cleanup and resample *plco
+				*plco = lco->lco_next;
+				free_lcobject (&lco);
+			} else {
+				// Proper object.  Continue to next *plco
+				plco = & lco->lco_next;
+			}
 		}
-		//TODO// Cleanup empty objects
 		lce = txnext;
 	}
 }
@@ -565,6 +590,8 @@ struct {
  * The number of variables must be 2, for DN and lcstate.
  *
  * The handle returned is an lcenv pointer.
+ *
+ * #TODO# Create a thread to handle timeouts and live in lcenv.
  */
 void *pulleyback_open (int argc, char **argv, int varc) {
 	if ((argc < 2) || (varc != 2)) {
@@ -618,6 +645,8 @@ done:
 
 
 /* Close a PulleyBack for Life Cycle Management.
+ *
+ * #TODO# Shutdown the thread living in the lcenv structure.
  */
 void pulleyback_close (void *pbh) {
 	struct lcenv *lce = (struct lcenv *) pbh;
@@ -714,7 +743,6 @@ static int _int_pb_addnotdel (bool add_not_del,
 			lcs->lcs_next = *plcs;
 			lco->lcs_todel =
 			*plcs = lcs;
-			//TODO// Cleanup empty objects
 		}
 	}
 	if (!success) {
@@ -732,7 +760,7 @@ static int _int_pb_addnotdel (bool add_not_del,
  * transaction is successfully open or when input data violates our
  * assumptions.
  */
-int pulleyback_add (void *pbh, uint8_t **forkdata) {
+int pulleyback_add (void *pbh, der_t *forkdata) {
 	struct lcenv *lce = (struct lcenv *) pbh;
 	struct fork *fd = (struct fork *) forkdata;
 	return _int_pb_addnotdel (true, lce, fd);
@@ -747,7 +775,7 @@ int pulleyback_add (void *pbh, uint8_t **forkdata) {
  * transaction is successfully open or when input data violates our
  * assumptions.
  */
-int pulleyback_del (void *pbh, uint8_t **forkdata) {
+int pulleyback_del (void *pbh, der_t *forkdata) {
 	struct lcenv *lce = (struct lcenv *) pbh;
 	struct fork *fd = (struct fork *) forkdata;
 	return _int_pb_addnotdel (false, lce, fd);
