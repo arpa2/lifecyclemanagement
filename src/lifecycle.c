@@ -13,7 +13,8 @@
 #include <errno.h>
 
 
-//TODO// include pulleyback.h
+//TODO// Include pulleyback.h locally (for now)
+#include "pulleyback.h"
 #include "lifecycle.h"
 
 
@@ -55,6 +56,44 @@ char *strchrnul (char *s, int c) {
 	return s;
 }
 
+
+/* Compare a NUL-terminated ASCII string with a (ptr,len) memory region
+ * that is also ASCII-compliant and lacks internal NUL characters.
+ */
+int strmemcmp (char *str, char *mem, size_t memlen) {
+	int rv = strncmp (str, (char *) mem, memlen);
+	if (rv == 0) {
+		if (str [memlen] != '\0') {
+			rv = -1;
+		}
+	}
+	return rv;
+}
+
+
+/* Parse the pointer and length from a DER header.
+ * Return success as true, failure as false.
+ */
+bool parse_der (uint8_t *der, char **ptr, size_t *len) {
+	der++;
+	if ((*der & 0x80) != 0x00) {
+		int lenlen = (*der & 0x7f);
+		if ((lenlen < 1) || (lenlen > 2)) {
+			return false;
+		}
+		*len = der [0];
+		if (lenlen == 2) {
+			*len = ((*len) << 8) | der [1];
+			*ptr = (char *) (der + 2);
+		} else {
+			*ptr = (char *) (der + 1);
+		}
+	} else {
+		*len = *der;
+		*ptr = (char *) (der + 1);
+	}
+	return true;
+}
 
 
 /********** ALLOCATION AND FREEING **********/
@@ -100,6 +139,23 @@ void free_lcstate (struct lcstate **lcs) {
 }
 
 
+/* Find a lifecycleState in a linked list with possible end marker.
+ * The value to be found usually comes from DER, so it is given as
+ * a memory (ptr,len) pair.
+ * Return NULL when the exact string was not found.
+ */
+struct lcstate **find_lcstate_ptr (struct lcstate **first,
+                                   struct lcstate *last_opt,
+                                   char *mem, size_t memlen) {
+	while ((*first) != last_opt) {
+		if (0 == (strmemcmp ((*first)->txt_attr, mem, memlen))) {
+			return first;
+		}
+		first = & (*first)->lcs_next;
+	}
+	return NULL;
+}
+
 
 /* Allocate and init a new lifecycleObject structure, for the given DN.
  */
@@ -133,6 +189,24 @@ void free_lcobject (struct lcobject **lco) {
 	free (*lco);
 	*lco = NULL;
 }
+
+
+/* Find a lifecycleObject in a linked list.
+ * The value to be found usually comes from DER, so it is given as
+ * a memory (ptr,len) pair.
+ * Return NULL when the exact string was not found.
+ */
+struct lcobject *find_lcobject (struct lcobject *first,
+				char *mem, size_t memlen) {
+	while (first != NULL) {
+		if (0 == (strmemcmp (first->txt_dn, mem, memlen))) {
+			return first;
+		}
+		first = first->lco_next;
+	}
+	return NULL;
+}
+
 
 
 /********** TIMER FUNCTIONS **********/
@@ -202,13 +276,6 @@ time_t update_lcstate_firetime (struct lcstate *lcs) {
 	update = stamp;
 done:
 	lcs->tim_next = update;
-/*
-	if (lco_opt != NULL) {
-		if (lco_opt->tim_first > update) {
-			lco_opt->tim_first = update;
-		}
-	}
-*/
 	return update;
 }
 
@@ -357,6 +424,28 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
 
 
 
+/********** OVERALL PROCESSING **********/
+
+
+
+/* The general course of action is always as follows:
+ *
+ *  1. Advance any events that can proceed
+ *  2. Update timers, find the first @timer to fire
+ *  3. Wait for the first @timer to occur
+ *  4. Externally trigger the corresponding lcstate @timer
+ *  5. Repeat with exponential fallback until lcstate is updated
+ *  6. Fire the lcstate ?events, update object, goto 2.
+ *
+ * This tidy run of events is dirsupted by LDAP, so that step 6 need not
+ * be taken care of here; LDAP changes to the lcstate would cause a restart.
+ * Some clever caching of changes during LDAP transactions could be useful.
+ *
+ * TODO: Run an overall processor, not interfering with Pulley queries.
+ */
+
+
+
 /********** TRANSACTION SUPPORT **********/
 
 
@@ -369,6 +458,8 @@ bool txn_isactive (struct lcenv *lce) {
 
 
 /* Open a fresh transaction.
+ *
+ * #TODO# Await Mutex for exclusive access by transaction
  */
 void txn_open (struct lcenv *lce) {
 	assert (! txn_isactive (lce));
@@ -386,6 +477,8 @@ void txn_open (struct lcenv *lce) {
 
 /* Break a transaction.  This recovers old state and disables any
  * further activity.
+ *
+ * #TODO# Release Mutex claimed by transaction
  */
 void txn_break (struct lcenv *lce) {
 	assert (txn_isactive (lce));
@@ -412,6 +505,8 @@ void txn_break (struct lcenv *lce) {
 
 /* The current transaction is done.
  * Delete what was setup for deletion, add what was prepared.
+ *
+ * #TODO# Release Mutex claimed by transaction
  */
 void txn_done (struct lcenv *lce) {
 	assert (txn_isactive (lce));
@@ -442,35 +537,11 @@ void txn_emptydata (struct lcenv *lce) {
 	assert (txn_isactive (lce));
 	struct lcobject *lco = lce->lco_first;
 	while (lco != NULL) {
-		// Move toadd and first over in todel
-		//TODO// Remove all attributes
-		//TODO//BAD// lco->lce_todel = lco->lce_toadd;
-		//TODO//BAD// lco->lce_first = lco->lce_toadd;
+		lco->lcs_todel =
+		lco->lcs_first = lco->lcs_toadd;
 		lco = lco->lco_next;
 	}
 }
-
-
-
-/********** OVERALL PROCESSING **********/
-
-
-
-/* The general course of action is always as follows:
- *
- *  1. Advance any events that can proceed
- *  2. Update timers, find the first @timer to fire
- *  3. Wait for the first @timer to occur
- *  4. Externally trigger the corresponding lcstate @timer
- *  5. Repeat with exponential fallback until lcstate is updated
- *  6. Fire the lcstate ?events, update object, goto 2.
- *
- * This tidy run of events is dirsupted by LDAP, so that step 6 need not
- * be taken care of here; LDAP changes to the lcstate would cause a restart.
- * Some clever caching of changes during LDAP transactions could be useful.
- *
- * TODO: Run an overall processor, not interfering with Pulley queries.
- */
 
 
 
@@ -478,7 +549,6 @@ void txn_emptydata (struct lcenv *lce) {
 
 
 
-typedef uint8_t *der_t;
 struct {
 	der_t distinguishedName;
 	der_t lifecycleState;
@@ -583,25 +653,89 @@ void pulleyback_close (void *pbh) {
 }
 
 
+/* INTERNAL FUNCTION:
+ *
+ * Add or delete an entry in the current transaction, if one is open.
+ * This internal function is run by the pulleyback_add and pulleyback_del
+ * functions, because they are so similar.  The variable add_not_del
+ * distinguishes on details.
+ *
+ * Return 1 on success and 0 on failure, including when no
+ * transaction is successfully open or when input data violates our
+ * assumptions.
+ */
+struct fork {
+	der_t dn;
+	der_t lcs;
+};
+static int _int_pb_addnotdel (bool add_not_del,
+				struct lcenv *lce, struct fork *fd) {
+	bool success = txn_isactive (lce);
+	char  *dnptr, *lcsptr;
+	size_t dnlen,  lcslen;
+	success = success && parse_der (fd->dn,  &dnptr,  &dnlen );
+	success = success && parse_der (fd->lcs, &lcsptr, &lcslen);
+	if (!success) {
+		return 0;
+	}
+	struct lcobject *lco = find_lcobject (lce->lco_first, dnptr, dnlen);
+	struct lcstate **plcs = NULL;
+	if (lco != NULL) {
+		plcs = find_lcstate_ptr (& lco->lcs_toadd,
+		                         lco->lcs_todel,
+		                         lcsptr, lcslen);
+	}
+	if (add_not_del) {
+		// While adding, we may have to add an lcobject for a DN
+		if (lco == NULL) {
+			lco = new_lcobject (dnptr, dnlen);
+			lco->lco_next = lce->lco_first;
+			lce->lco_first = lco;
+		}
+		// While adding, we may have to add an lcstate for an LCS
+		if (plcs == NULL) {
+			struct lcstate *lcs;
+			lcs = new_lcstate (lco, lcsptr, lcslen);
+			lcs->lcs_next = lco->lcs_toadd;
+			lco->lcs_toadd = lcs;
+		}
+	} else {
+		// While deleting, we require all data to pre-exist
+		success = success && (lco != NULL) && (plcs != NULL);
+		if (success) {
+			// Cut out the found lcstate (which ends in lcs)
+			struct lcstate *lcs = *plcs;
+			*plcs = lcs->lcs_next;
+			// Prefix the found lcstate (in lcs) to lcs_todel
+			plcs = & lco->lcs_first;
+			while (*plcs != lco->lcs_todel) {
+				plcs = & (*plcs)->lcs_next;
+			}
+			lcs->lcs_next = *plcs;
+			lco->lcs_todel =
+			*plcs = lcs;
+			//TODO// Cleanup empty objects
+		}
+	}
+	if (!success) {
+		txn_break (lce);
+	}
+	return success ? 1 : 0;
+}
+
+
 /* Add an entry to the current transaction, if one is open.
  * Since varc is assured to be 2, the forkdata holds two
  * values, interpreted as distinguishedName and lifecycleState.
  *
  * Return 1 on success and 0 on failure, including when no
- * transaction is successfully open.
+ * transaction is successfully open or when input data violates our
+ * assumptions.
  */
 int pulleyback_add (void *pbh, uint8_t **forkdata) {
 	struct lcenv *lce = (struct lcenv *) pbh;
 	struct fork *fd = (struct fork *) forkdata;
-	if (!txn_isactive (lce)) {
-		return 0;
-	}
-	int success = 0;
-	// TODO_ACTION;
-	if (!success) {
-		txn_break (lce);
-	}
-	return success;
+	return _int_pb_addnotdel (true, lce, fd);
 }
 
 
@@ -610,20 +744,13 @@ int pulleyback_add (void *pbh, uint8_t **forkdata) {
  * values, interpreted as distinguishedName and lifecycleState.
  *
  * Return 1 on success and 0 on failure, including when no
- * transaction is successfully open.
+ * transaction is successfully open or when input data violates our
+ * assumptions.
  */
 int pulleyback_del (void *pbh, uint8_t **forkdata) {
 	struct lcenv *lce = (struct lcenv *) pbh;
 	struct fork *fd = (struct fork *) forkdata;
-	if (!txn_isactive (lce)) {
-		return 0;
-	}
-	int success = 0;
-	// TODO_ACTION;
-	if (!success) {
-		txn_break (lce);
-	}
-	return success;
+	return _int_pb_addnotdel (false, lce, fd);
 }
 
 
