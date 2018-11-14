@@ -36,13 +36,15 @@
 
 
 
-#include <assert.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <ctype.h>
 #include <string.h>
 #include <stdio.h>
+
+#include <assert.h>
 
 #include <time.h>
 #include <syslog.h>
@@ -55,6 +57,25 @@
 //TODO// Include pulleyback.h locally (for now)
 #include "pulleyback.h"
 #include "lifecycle.h"
+
+
+
+#ifdef DEBUG
+static void debug (char *fmt, ...) {
+	va_list argl;
+	fprintf (stderr, "DEBUG: ");
+	fflush (stderr);
+	va_start (argl, fmt);
+	vfprintf (stderr, fmt, argl);
+	va_end (argl);
+	fprintf (stderr, "\n");
+	fflush (stderr);
+}
+#else
+static inline debug (char *fmt, ...) {
+	;
+}
+#endif
 
 
 /* External Dependencies:
@@ -175,12 +196,14 @@ bool grammar_lcstate (char *lcs) {
 	static regex_t re;
 	// Compile the regex if so desired
 	if (!done) {
+		debug ("Compiling lcs regex \"%s\"", LIFECYCLESTATE_RE);
 		assert (0 == regcomp (&re,
 				LIFECYCLESTATE_RE,
 				REG_EXTENDED | REG_NOSUB));
 		done = true;
 	}
 	// Use the regex that was previously compiled
+	debug ("Testing lcs grammar \"%s\"", lcs);
 	return 0 == regexec (&re, lcs, 0, NULL, 0);
 }
 
@@ -199,12 +222,14 @@ bool grammar_dn (char *dn) {
 	static regex_t re;
 	// Compile the regex if so desired
 	if (!done) {
+		debug ("Compiling dn regex \"%s\"", DISTINGUISHEDNAME_RE);
 		assert (0 == regcomp (&re,
 				DISTINGUISHEDNAME_RE,
 				REG_EXTENDED | REG_NOSUB));
 		done = true;
 	}
 	// Use the regex that was previously compiled
+	debug ("Testing dn grammar \"%s\"", dn);
 	return 0 == regexec (&re, dn, 0, NULL, 0);
 }
 
@@ -272,6 +297,16 @@ struct lcstate **find_lcstate_ptr (struct lcstate **first,
 }
 
 
+/* For debugging purposes, print lifecycleState.
+ */
+#ifdef DEBUG
+void debug_lcstate (struct lcstate *lcs) {
+	debug (" | +---> lifecycleState: %s", lcs->txt_attr);
+	debug (" | |     ofs_next=%d tim_next=%d cnt_missed=%d", lcs->ofs_next, lcs->tim_next, lcs->cnt_missed);
+}
+#endif
+
+
 /* Allocate and init a new lifecycleObject structure, for the given DN.
  */
 struct lcobject *new_lcobject (char *dn, size_t dnlen) {
@@ -316,6 +351,21 @@ struct lcobject *find_lcobject (struct lcobject *lco_dnhash,
 	HASH_FIND (hsh_dn, lco_dnhash, mem, memlen, retval);
 	return retval;
 }
+
+
+/* For debugging purposes, print lifecycleObject information.
+ */
+#ifdef DEBUG
+void debug_lcobject (struct lcobject *lco) {
+	debug (" +-+-> dn: %s", lco->txt_dn);
+	debug (" | |   tim_first=%d", lco->tim_first);
+	struct lcstate *lcs = lco->lcs_first;
+	while (lcs != NULL) {
+		debug_lcstate (lcs);
+		lcs = lcs->lcs_next;
+	}
+}
+#endif
 
 
 
@@ -892,6 +942,20 @@ void txn_isaborted_clr (struct lcenv *lce) {
 	assert (!txn_isactive (lce));
 	lce->lce_flags &= ~LCE_ABORTED;
 }
+
+
+/* For debugging purposes, print lcenv information.
+ */
+#ifdef DEBUG
+void debug_lcenv (struct lcenv *lce) {
+	debug ("---> txn_isactive=%d, txn_isaborted=%d", txn_isactive (lce), txn_isaborted (lce));
+	struct lcobject *lco = lce->lco_first;
+	while (lco != NULL) {
+		debug_lcobject (lco);
+		lco = lco->lco_next;
+	}
+}
+#endif
 
 
 /* Open a fresh transaction.  This is an internal transaction,

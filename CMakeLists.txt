@@ -58,6 +58,7 @@ endif()
 # BUILDING
 #
 add_subdirectory (src)
+add_subdirectory (test)
 
 add_uninstall_target ()
 

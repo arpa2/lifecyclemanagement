@@ -1,4 +1,3 @@
-# Build the ARPA2 Service Libraries twice: once shared, once static.
 include_directories (.)
 
 # Forward the CMake option to the compiler
