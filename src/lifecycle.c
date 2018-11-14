@@ -554,8 +554,48 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
 
 
 
+/* When a service fires, run over all registered lcstate that have a timer
+ * set to at most the lcobject first firing time; this is always at least
+ * one lcstate.
+ *
+ * During the setup of a Pulley Backend instance, a series of drivers for
+ * lifecycle-named processes was openend with popen() and kept in the
+ * lcenv.  Write two lines to the popen()ed process, one holding the
+ * distinguishedName of the lcobject, the second with the lifecycleState
+ * from the lcstate.
+ *
+ * TODO: Error handling; processes can fail, and what then?  Use ferror()?
+ */
 void service_fire_timer (struct lcobject *lco, struct lcenv *lce) {
-	"TODO";
+	// Find at least one lcstate to fire
+	time_t timer = lco->tim_first;
+	bool fired_some_lcstate_timer = false;
+	struct lcstate *lcs = lco->lcs_first;
+	while (lcs != NULL) {
+		// See if this lcstate wants to fire
+		if ((lcs->typ_next == '@') && (lcs->tim_next <= timer)) {
+			char  *lcname    = lcs->txt_attr;
+			size_t lcnamelen = idlen (lcname);
+			// Iterate over the lcdriver list
+			struct lcdriver *lcd = lce->lcd_cmds;
+			uint32_t lcdnum      = lce->cnt_cmds;
+			while (lcdnum-- > 0) {
+				if (0 == strmemcmp (lcd->cmdname,
+						lcname, lcnamelen)) {
+					fprintf (lcd->cmdpipe, "%s\n%s\n",
+						lco->txt_dn,
+						lcs->txt_attr);
+					fflush (lcd->cmdpipe);
+					fired_some_lcstate_timer = true;
+					break;
+				}
+				lcd++;
+			}
+		}
+		// Move to the next lcstate for this lcobject
+		lcs = lcs->lcs_next;
+	}
+	assert (fired_some_lcstate_timer);
 }
 
 
