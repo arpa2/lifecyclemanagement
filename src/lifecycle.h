@@ -20,6 +20,8 @@
 
 #include <time.h>
 
+#include "uthash.h"
+
 
 
 // One lifecycleState attribute value, stored as NUL-terminated ASCII.
@@ -59,14 +61,20 @@ struct lcstate {
 // toadd becomes the new first.
 //
 struct lcobject {
-	struct lcobject *lco_next;	//TODO// maybe??? diff timerQ / hashQ
+	struct lcobject *lco_next;
 	struct lcstate  *lcs_first;
 	struct lcstate  *lcs_toadd;
 	struct lcstate  *lcs_todel;
 	time_t           tim_first;
-	uint32_t         hsh_dn;
+	UT_hash_handle   hsh_dn;
 	char             txt_dn [1];
 };
+
+
+// Is there a POSIX-standard way of quoting the maximum time_t value?
+// The following assumes it is an unsigned type, which is reasonable.
+//
+#define MAX_TIME_T (~(time_t)0)
 
 
 // An lcdriver or Life Cycle Driver is a command to be opened with popen()
@@ -107,6 +115,7 @@ struct lcenv {
 	pthread_cond_t   pth_sigpost;	// signal from pulley, wait by service
 	pthread_t        pth_service;	// this lcenv's service thread
 	struct lcobject *lco_first;	// rd/wr only under pth_envown
+	struct lcobject *lco_dnhash;	// owned by pulley backend
 	struct lcenv    *env_txncycle;	// owned by pulley backend
 	uint32_t         lce_flags;	// owned by pulley backend
 	uint32_t         cnt_cmds;	// only written before service
@@ -114,4 +123,8 @@ struct lcenv {
 };
 
 #define LCE_ABORTED 0x00000001
+
+
+
+//TODO// REGEX GRAMMAR FOR LIFECYCLESTATE (AND, MAYBE, DISTINGUISHEDNAME)
 

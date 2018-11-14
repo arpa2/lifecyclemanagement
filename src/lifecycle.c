@@ -1,3 +1,39 @@
+/* PulleyBack driver with Life Cycle Management.
+ *
+ * This module is what is called an output driver in SteamWorks Pulley.
+ * It is loaded into a PulleyScript as a dynamic library, and called to
+ * add or remove the forks that are defined in PulleyScript.  These forks
+ * must be a pair of a distinguishedName and a lifecycleState attribute.
+ *
+ * The lifecycleState denotes timed events (including as soon as possible)
+ * and awaiting changes in other lifecycleState sequences in the same
+ * lifecycleObject.  It works like a simplified form of CSP.
+ *
+ * This backend handles the interdependencies between the life cycles,
+ * and allows the timed events to be processed without any further
+ * cross-dependencies.  This processing of timed events is performed by
+ * passing a distinguishedName and lifecycleState to a handler process
+ * that is specific for the lifecycleState.  The handler should take
+ * action and, when successful, change the lifecycleState in LDAP, which
+ * then leads back to this plugin, which examines it for continued work.
+ *
+ * The current state is shown in LDAP, by a dot that separates past and
+ * future actions.  The handler's task is to move the dot forward, ideally
+ * until the end.  When the end is reached, the lifecycleState no longer
+ * appears here, because it is done.
+ *
+ * This component was designed for the ARPA2 KeyMaster, infrastructure
+ * for managing keys in spite of their confusing collective state that
+ * might combine X.509, DANE, ACME.  Things like DNS caching makes this
+ * a rather nettly issue to do well under massive automation.  This is
+ * why the KeyMaster is a solid part of the IdentityHub, which in turn
+ * is the second phase of the InternetWide Architecture described at
+ * http://internetwide.org and worked out in many ARPA2 projects on
+ * https://github.com/arpa2 and http://<project>.arpa2.net websites.
+ *
+ * From: Rick van Rein <rick@openfortress.nl>
+ */
+
 
 
 #include <assert.h>
@@ -11,13 +47,40 @@
 #include <time.h>
 #include <syslog.h>
 #include <errno.h>
-
+#include <regex.h>
 #include <pthread.h>
 
-
+//TODO// Transition lco_first/_next to UT_hash iteration?
+#include "uthash.h"
 //TODO// Include pulleyback.h locally (for now)
 #include "pulleyback.h"
 #include "lifecycle.h"
+
+
+/* External Dependencies:
+ *
+ * We use "uthash.h" for quickly locating a distinguishedName, which may
+ * occur relatively frequently.  The same does not apply to lifecycleState,
+ * which only occurs during addition and removal of the value.
+ *
+ * For time-based information, the best is probably to collect only those
+ * that expire in the next 10 seconds or so, and to search for the double
+ * value and so on until done.  It is pretty useless to want to sort the
+ * while timer loop.  This is why we prefer not to use "utlist.h" for
+ * lists.
+ *
+ * Note that "uthash.h" and "utlist.h" are macro trick boxes only.
+ *
+ * We can use the POSIX functions for regular expressions in C, so the
+ * regcomp(), regexec(), regfree() and regerror() couple.  Those assume
+ * NUL-terminated strings, so we need to be careful using DER information.
+ * It may be beneficial to have lifecycleState on stack as a C string,
+ * while checking the absense of internal NUL characters (strncpy() output?)
+ * and use that while processing an action that involves those strings.
+ */
+
+
+//TODO// Cleanup routines for DNs without LCS left
 
 
 
@@ -144,6 +207,7 @@ void free_lcstate (struct lcstate **lcs) {
 /* Find a lifecycleState in a linked list with possible end marker.
  * The value to be found usually comes from DER, so it is given as
  * a memory (ptr,len) pair.
+ *
  * Return NULL when the exact string was not found.
  */
 struct lcstate **find_lcstate_ptr (struct lcstate **first,
@@ -169,8 +233,7 @@ struct lcobject *new_lcobject (char *dn, size_t dnlen) {
 	}
 	// trailing NUL from calloc() [allocated due to char[1] in struct)
 	memcpy (new->txt_dn, dn, dnlen);
-	// TODO: compute hsh_dn
-	new->tim_first = ~ (time_t) 0;  // highest possible setting
+	new->tim_first = MAX_TIME_T;
 	// lcs_first was set to NULL by calloc()
 	// lco_next  was set to NULL by calloc()
 	return new;
@@ -193,20 +256,16 @@ void free_lcobject (struct lcobject **lco) {
 }
 
 
-/* Find a lifecycleObject in a linked list.
+/* Find a lifecycleObject in an UT_hash table.
  * The value to be found usually comes from DER, so it is given as
  * a memory (ptr,len) pair.
  * Return NULL when the exact string was not found.
  */
-struct lcobject *find_lcobject (struct lcobject *first,
+struct lcobject *find_lcobject (struct lcobject *lco_dnhash,
 				char *mem, size_t memlen) {
-	while (first != NULL) {
-		if (0 == (strmemcmp (first->txt_dn, mem, memlen))) {
-			return first;
-		}
-		first = first->lco_next;
-	}
-	return NULL;
+	struct lcobject *retval;
+	HASH_FIND (hsh_dn, lco_dnhash, mem, memlen, retval);
+	return retval;
 }
 
 
@@ -218,7 +277,7 @@ struct lcobject *find_lcobject (struct lcobject *first,
 /* Mark the firing time in an lcobject as "dirty", that is,
  * as being in need of an update.
  */
-void smudge_lcobject_firetiem (struct lcobject *lco) {
+void smudge_lcobject_firetime (struct lcobject *lco) {
 	lco->tim_first = 0;
 }
 
@@ -241,7 +300,7 @@ void smudge_lcstate_firetime (struct lcstate *lcs, struct lcobject *lco) {
 /* Test if the firing time in an lcstate is "dirty", that is,
  * needs an update.
  */
-bool dirty_lcstate_firetime (struct lcstate *lcs) {
+bool smudged_lcstate_firetime (struct lcstate *lcs) {
 	return lcs->tim_next == 0;
 }
 
@@ -249,15 +308,15 @@ bool dirty_lcstate_firetime (struct lcstate *lcs) {
 /* Test if the firing time in an lcobject is "dirty", that is,
  * needs an update.
  */
-bool dirty_lcobject_firetime (struct lcobject *lco) {
+bool smudged_lcobject_firetime (struct lcobject *lco) {
 	return lco->tim_first == 0;
 }
 
 
-/* When the next event is '@' type, test when it may fire.
+/* When the next event is '@' or '=' type, test when it may fire.
  */
 time_t update_lcstate_firetime (struct lcstate *lcs) {
-	time_t update = ~ (time_t) 0;
+	time_t update = MAX_TIME_T;
 	if (lcs->typ_next != '@') {
 		goto done;
 	}
@@ -266,11 +325,16 @@ time_t update_lcstate_firetime (struct lcstate *lcs) {
 		goto done;
 	}
 	timestr++;
-	if ((*timestr == ' ') || (*timestr == '\0')) {
+	if (!isdigit (*timestr)) {
+		// '=' or ' ' or '\0', but not a timestamp
 		update = time (NULL);
 		goto done;
 	}
 	unsigned long stamp = strtoul (timestr, &timestr, 10);
+	if (stamp == 0) {
+		update = time (NULL);
+		goto done;
+	}
 	if (stamp != (unsigned long) (time_t) stamp) {
 		syslog (LOG_ERR, "Time out of bounds: %zd", stamp);
 		goto done;
@@ -288,10 +352,10 @@ done:
  * dirty status .
  */
 void update_lcobject_firetime (struct lcobject *lco) {
-	lco->tim_first = ~ (time_t) 0;
+	lco->tim_first = MAX_TIME_T;
 	struct lcstate *lcs = lco->lcs_first;
 	while (lcs != NULL) {
-		if (dirty_lcstate_firetime (lcs)) {
+		if (smudged_lcstate_firetime (lcs)) {
 			update_lcstate_firetime (lcs);
 		}
 		assert (lcs->tim_next != 0);
@@ -312,7 +376,8 @@ void update_lcobject_firetime (struct lcobject *lco) {
  *
  * This MUST NOT be run while an LDAP transaction is in progress, as it
  * might temporarily remove an attribute.  We would be breaking atomicity
- * if we acted on a missing attribute.
+ * if we acted on a missing attribute.  It is instead called from the
+ * service thread.
  *
  * This change is idempotent.  Return whether something new was advanced.
  */
@@ -384,7 +449,8 @@ bool advance_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
  *
  * This MUST NOT be run while an LDAP transaction is in progress, as it
  * might temporarily remove an attribute.  We would be breaking atomicity
- * if we acted on a missing attribute.
+ * if we acted on a missing attribute.  It is instead called from the
+ * service thread.
  *
  * This change is idempotent.  Return whether something new was advanced.
  */
@@ -410,7 +476,8 @@ bool advance_lcobject_events (struct lcobject *lco) {
  *
  * This MUST NOT be run while an LDAP transaction is in progress, as it
  * might temporarily remove an attribute.  We would be breaking atomicity
- * if we acted on a missing attribute.
+ * if we acted on a missing attribute.  It is instead called from the
+ * service thread.
  *
  * This change is idempotent.  Return whether something new was advanced.
  */
@@ -426,27 +493,15 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
 
 
 
-/********** OVERALL PROCESSING **********/
+/********** SERVICE THREAD **********/
 
-
-
-/* The general course of action is always as follows:
- *
- *  1. Advance any events that can proceed
- *  2. Update timers, find the first @timer to fire
- *  3. Wait for the first @timer to occur
- *  4. Externally trigger the corresponding lcstate @timer
- *  5. Repeat with exponential fallback until lcstate is updated
- *  6. Fire the lcstate ?events, update object, goto 2.
- *
- * This tidy run of events is dirsupted by LDAP, so that step 6 need not
- * be taken care of here; LDAP changes to the lcstate would cause a restart.
- * Some clever caching of changes during LDAP transactions could be useful.
- */
 
 
 /* When a backend instance is openened, it is given its own thread.
  * When the backend instance is closed, the thread is taken away.
+ * We refer to this thread as the service thread of an lcenv; it
+ * exists only because Pulley retains control while we would like
+ * to respond to timeouts, not just LDAP changes.
  *
  * The context of each thread is its own lcenv.  It passes lines
  * to output drivers, multiple if need be -- LDAP can wait for us.
@@ -461,6 +516,7 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
  * The Mutex in the lcenv is claimed during transaction start, and
  * released after transaction end, good or bad.
  */
+
 
 
 /* Threads synchronise as follows:
@@ -496,14 +552,215 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
  *     transaction.  Since no further changes are made, this is fine.
  */
 
+
+
+void service_fire_timer (struct lcobject *lco, struct lcenv *lce) {
+	"TODO";
+}
+
+
+/* Pass through all events of all objects, and check any lcname?events
+ * that can be advanced.  Any other types, such as '@' and '=' will
+ * block further progress, and count as things to report to the handler
+ * for the lifecycle, so it may cycle back through LDAP with updates.
+ */
+void service_advance_events (struct lcenv *lce) {
+	struct lcobject *lco = lce->lco_first;
+	// One run suffices, because objects don't communicate
+	while (lco != NULL) {
+		advance_lcobject_events (lco);
+		lco = lco->lco_next;
+	}
+}
+
+
+/* Pass through all objects, recomputing their timers when they are smudged
+ * and the type is that of a timer, and finally sort the most likely timers
+ * to fire soon.
+ *
+ * The "most likely timers" are a bit like the trickery of "utlist.h" sorting,
+ * but the sorting is incomplete.  Only the beginning of the list ends up in
+ * order.  Most of the remainder is left in the order it is at.  The entire
+ * list is traversed however; this is generally necessary because there may
+ * be new timers due to the advancing of services.
+ *
+ * The selection of "most likely timers" is a gradual process, and works
+ * best with the most recent timers in the beginning.  The idea is to have
+ * those in there that are at most twice as long away from now as the first
+ * timer to expire.  Negative delays pass immediately, of course.  The ones
+ * left are sorted by time.
+ *
+ * The processing that takes care of this is a bit like mitochondria digesting
+ * chains of sugars or fats.  Taking a bit from the top, process it, move on.
+ * When the time is too far in the future, it is left where it is, on the tail
+ * behind the sorted list.  When the time is new enough, it is taken out and
+ * inserted in the right place in the (hopefully short) prefix list.
+ *
+ * Once done, the first lcobject is the first to expire.  Any ones that fall
+ * before now can be passed through immediately, but at some point the future
+ * values show up, in sorted order.  From these, a future timer can be set
+ * as an alternative to condition waiting.  But if the first is not a timer
+ * then none exists in the list, and only condition waiting should be used.
+ *
+ * In the exceptional case that past timers take more time than the prepared
+ * sorting time, the algorithm may need to run again.  This will be achieved
+ * with an ugly goto statement, to avoid the suggestion that it would be a
+ * structural action.
+ */
+void service_update_timers (struct lcenv *lce) {
+	time_t now = time (NULL);
+	int32_t accept_upto;
+refresh:
+	//
+	// Construct a list with a time-ordered beginning.
+	//
+	accept_upto = 0x7fffffff;
+	// Initially, we have no objects, just places to insert into
+	struct lcobject **phd = & lce->lco_first;
+	struct lcobject **ptl = phd;
+	struct lcobject  *cur = *phd;
+	// Loop over objects, possibly extending the head or tail
+	while (cur = *ptl, cur != NULL) {
+		bool use = false;
+		// If needed, update the firing time
+		if (smudged_lcobject_firetime (cur)) {
+			update_lcobject_firetime (cur);
+		}
+		// Find the future timing
+		if (cur->tim_first <= now) {
+			// Timer should have fired
+			use = true;
+		} else {
+			// Timer is in the future
+			time_t future = cur->tim_first - now;
+			if (future <= accept_upto) {
+				// Acceptably sized future
+				// (Initially matches almost anything)
+				use = true;
+				if (future < accept_upto/2) {
+					// Radically closer than before
+					accept_upto = future * 2;
+				}
+			}
+		}
+		// We now know if cur should be taken out for sorting
+		if (use) {
+			// Remove cur from the tail
+			*ptl = cur->lco_next;
+			cur->lco_next = NULL;
+			// Find the place for cur after *phead
+			struct lcobject **cmp = phd;
+			time_t curfire = cur->tim_first;
+			while (*cmp != NULL) {
+				if ((*cmp)->tim_first > curfire) {
+					break;
+				}
+				cmp = & (*cmp)->lco_next;
+			}
+			// Insert cur before *cmp (which may be NULL)
+			cur->lco_next = *cmp;
+			*cmp = cur;
+			// Unusual: keep ptl because *ptl has moved
+			continue;
+		} else {
+			// Current-cursor iteration beyond unchanged *ptl
+			ptl = & cur->lco_next;
+		}
+	}
+	//
+	// Run any events up to now in the list.
+	//
+	time_t newnow;
+	struct lcobject *lco = lce->lco_first;
+	while (newnow = time (NULL),
+			(lco != NULL) && (lco->tim_first <= newnow)) {
+		// Hurry!  We should already have done this!
+		service_fire_timer (lco, lce);
+		// Rework the firing time; more lcstate may want to fire
+		update_lcobject_firetime (lco);
+		// Only iterate when there is no more lcstate to fire
+		if (lco->tim_first > newnow) {
+			lco = lco->lco_next;
+		}
+	}
+	if (newnow - now > accept_upto) {
+		// We ran so much work that the partial sorting is drained
+		goto refresh;
+	}
+	//
+	// The first lcobject to fire is now in lco_first, if any.
+	//
+	// Return.
+}
+
+
+/* We have done all we could, and are now waiting for something positive
+ * to come our way.  This may take one of two forms:
+ *  - a condition signal over lce_sigpost, indicating a txn_done()
+ *  - a timer expiring, namely the first returned after service_update_timers()
+ * Note that the timer is optional; there may be none at all.
+ */
+void service_wait (struct lcenv *lce) {
+	// Decide if a timer is waiting to expire
+	time_t first_expiration = MAX_TIME_T;
+	if (lce->lco_first != NULL) {
+		first_expiration = lce->lco_first->tim_first;
+	}
+	bool with_timer = first_expiration < MAX_TIME_T;
+	// Wait for a condition, with or without a timer
+	if (with_timer) {
+		// Setup absolute time structure
+		struct timespec abstime;  /* tv_sec, tv_nsec */
+		memset (&abstime, 0, sizeof (abstime));
+		abstime.tv_sec  = first_expiration;
+		// Wait for a signal or reaching the absolute time
+		assert (!pthread_cond_timedwait (
+				&lce->pth_sigpost,
+				&lce->pth_envown,
+				&abstime));
+	} else {
+		// Wait for a signal but not for a certain time
+		assert (!pthread_cond_wait (
+				&lce->pth_sigpost,
+				&lce->pth_envown));
+	}
+}
+
+
+/* The general course of action is always as follows:
+ *
+ *  1. Advance any events that can proceed
+ *  2. Update timers, find the first @timer to fire
+ *  3. Wait for the first @timer to occur
+ *  4. Externally trigger the corresponding lcstate @timer
+ *  5. Repeat with exponential fallback until lcstate is updated
+ *  6. Fire the lcstate ?events, update object, goto 2.
+ *
+ * This tidy run of events is dirsupted by LDAP, so that step 6 need not
+ * be taken care of here; LDAP changes to the lcstate would cause a restart.
+ * Some clever caching of changes during LDAP transactions could be useful.
+ */
 void *service_main (void *ctx) {
 	struct lcenv *lce = (struct lcenv *) ctx;
 	assert (lce != NULL);
 	int _oldtype;
+	// Only be cancelled at controlled points
 	assert (!pthread_setcanceltype (PTHREAD_CANCEL_DEFERRED, &_oldtype));
-	//TODO//MAIN_LOOP_LOGIC//OUTPUT_DRIVING//
-	pthread_exit (NULL);
-	return NULL;
+	// We claim lcobject and lcstate access
+	assert (!pthread_mutex_lock (&lce->pth_envown));
+	// Enter the main loop of the service thread
+	while (true) {
+		// Advance any events that can proceed right now
+		service_advance_events (lce);
+		// Update timers and find the first @timer to fire
+		service_update_timers (lce);
+		// Wait for commit from Pulley, or optional timer expiration
+		service_wait (lce);
+	}
+	// The thread runs in the main loop until it is cancelled
+	// pthread_mutex_unlock (&lce->lce_envown);
+	// pthread_exit (NULL);
+	// return NULL;
 }
 
 
@@ -636,6 +893,7 @@ void txn_done (struct lcenv *lce) {
 			if (lco->lcs_first == NULL) {
 				// Empty object.  Cleanup and resample *plco
 				*plco = lco->lco_next;
+				HASH_DELETE (hsh_dn, lce->lco_dnhash, lco);
 				free_lcobject (&lco);
 			} else {
 				// Proper object.  Continue to next *plco
@@ -670,10 +928,10 @@ void txn_emptydata (struct lcenv *lce) {
 
 
 
-struct {
-	der_t distinguishedName;
-	der_t lifecycleState;
-} fork;
+struct fork {
+	der_t dn;
+	der_t lcs;
+};
 
 
 
@@ -705,7 +963,7 @@ void *pulleyback_open (int argc, char **argv, int varc) {
 	struct lcenv *lce = calloc (sizeof (struct lcenv) + (argc-2) * sizeof (struct lcdriver), 1);
 	if (lce == NULL) {
 		errno = ENOMEM;
-		bad = 1;
+		bad++;
 		goto done;
 	}
 	//
@@ -730,7 +988,7 @@ void *pulleyback_open (int argc, char **argv, int varc) {
 	assert (!pthread_mutex_init (&lce->pth_envown,  NULL));
 	assert (!pthread_cond_init  (&lce->pth_sigpost, NULL));
 	assert (!pthread_create     (&lce->pth_service, NULL,
-	                            service_main, (void *) lce));
+	                             service_main, (void *) lce));
 	// Return the result
 done:
 	if (bad > 0) {
@@ -761,6 +1019,7 @@ void pulleyback_close (void *pbh) {
 	struct lcobject *lco = lce->lco_first;
 	while (lco != NULL) {
 		struct lcobject *lcn = lco->lco_next;
+		HASH_DELETE (hsh_dn, lce->lco_dnhash, lco);
 		free_lcobject (&lco);
 		lco = lcn;
 	}
@@ -800,11 +1059,9 @@ void pulleyback_close (void *pbh) {
  * Return 1 on success and 0 on failure, including when no
  * transaction is successfully open or when input data violates our
  * assumptions.
+ *
+ * #TODO# Would be useful to scan the grammar here.
  */
-struct fork {
-	der_t dn;
-	der_t lcs;
-};
 static int _int_pb_addnotdel (bool add_not_del,
 				struct lcenv *lce, struct fork *fd) {
 	// Continue the failure of preceding actions (and bypass activity)
@@ -814,34 +1071,48 @@ static int _int_pb_addnotdel (bool add_not_del,
 		txn_open (lce);
 	}
 	// Parse single DER attributes into ptr,len values
-	char  *dnptr, *lcsptr;
-	size_t dnlen,  lcslen;
+	char  *dnptr =  dnptr;
+	char *lcsptr = lcsptr;
+	size_t  dnlen = 0;
+	size_t lcslen = 0;
 	success = success && parse_der (fd->dn,  &dnptr,  &dnlen );
 	success = success && parse_der (fd->lcs, &lcsptr, &lcslen);
+	// Make ASCII strings (safe and fast when parse_der() did not run)
+	char dnstr  [ dnlen+1];
+	char lcsstr [lcslen+1];
+	memcpy ( dnstr,  dnptr,  dnlen);
+	memcpy (lcsstr, lcsptr, lcslen);
+	dnstr  [dnlen ] = '\0';
+	lcsstr [lcslen] = '\0';
+	// Verify the absense of inner NUL characters
+	success = success && (memchr ( dnstr, '\0',  dnlen) == NULL);
+	success = success && (memchr (lcsstr, '\0', lcslen) != NULL);
+	//TODO// Use libregex to validate the grammar of the lifecycleState
 	// In case of failure, stop now and make no changes
 	if (!success) {
 		return 0;
 	}
 	// Try to locate the lcobject to work on -- NULL if not found
-	struct lcobject *lco = find_lcobject (lce->lco_first, dnptr, dnlen);
+	struct lcobject *lco = find_lcobject (lce->lco_dnhash, dnstr, dnlen);
 	struct lcstate **plcs = NULL;
 	if (lco != NULL) {
 		plcs = find_lcstate_ptr (& lco->lcs_toadd,
 		                         lco->lcs_todel,
-		                         lcsptr, lcslen);
+		                         lcsstr, lcslen);
 	}
 	// Split activity into addition and deletion
 	if (add_not_del) {
 		// While adding, we may have to add an lcobject for a DN
 		if (lco == NULL) {
-			lco = new_lcobject (dnptr, dnlen);
+			lco = new_lcobject (dnstr, dnlen);
 			lco->lco_next = lce->lco_first;
 			lce->lco_first = lco;
+			HASH_ADD (hsh_dn, lce->lco_dnhash, txt_dn, dnlen, lco);
 		}
 		// While adding, we may have to add an lcstate for an LCS
 		if (plcs == NULL) {
 			struct lcstate *lcs;
-			lcs = new_lcstate (lco, lcsptr, lcslen);
+			lcs = new_lcstate (lco, lcsstr, lcslen);
 			lcs->lcs_next = lco->lcs_toadd;
 			lco->lcs_toadd = lcs;
 		}
@@ -974,8 +1245,21 @@ int pulleyback_collaborate (void *pbh1, void *pbh2) {
 	struct lcenv *lce2 = (struct lcenv *) pbh2;
 	assert (txn_isactive (lce1));
 	assert (txn_isactive (lce2));
-	if (txn_isactive (lce1)) {
-		if (txn_isactive (lce2)) {
+	if (txn_isaborted (lce1)) {
+		if (txn_isaborted (lce2)) {
+			// both transactions broke down, trivially accept
+			return 1;
+		} else {
+			// lce1 broke down, so lce2 should also be broken
+			txn_break (lce2);
+			return 1;
+		}
+	} else {
+		if (txn_isaborted (lce2)) {
+			// lce2 broke down, so lce1 should also be broken
+			txn_break (lce1);
+			return 1;
+		} else {
 			// both transactions live, so merge their cycles
 			struct lcenv *one1 = lce1->env_txncycle;
 			struct lcenv *one2 = lce2->env_txncycle;
@@ -984,19 +1268,7 @@ int pulleyback_collaborate (void *pbh1, void *pbh2) {
 			one1->env_txncycle = two2;
 			one2->env_txncycle = two1;
 			return 0;
-		} else {
-			// lce2 broke down, so lce1 should also be broken
-			txn_break (lce1);
-		}
-	} else {
-		if (txn_isactive (lce2)) {
-			// lce1 broke down, so lce2 should also be broken
-			txn_break (lce1);
-		} else {
-			// both transactions broke down, trivially accept
-			;
 		}
 	}
-	return 1;
 }
 
