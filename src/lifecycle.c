@@ -161,6 +161,55 @@ bool parse_der (uint8_t *der, char **ptr, size_t *len) {
 }
 
 
+/* Check the syntax of a lifecycleState attribute value.
+ * The first run will compile the value.  Removal is not forced but
+ * is normal operating system service at exit().  The life time for the
+ * compiled regular expression is unbounded.
+ */
+#ifndef LIFECYCLESTATE_RE
+#warning "No lifecycleState grammer defined as LIFECYCLESTATE_RE yet"
+#define LIFECYCLESTATE_RE ".*"
+#endif
+bool grammar_lcstate (char *lcs) {
+	static bool done = false;
+	static regex_t re;
+	// Compile the regex if so desired
+	if (!done) {
+		assert (0 == regcomp (&re,
+				LIFECYCLESTATE_RE,
+				REG_EXTENDED | REG_NOSUB));
+		done = true;
+	}
+	// Use the regex that was previously compiled
+	return 0 == regexec (&re, lcs, 0, NULL, 0);
+}
+
+
+/* Check the syntax of a distinguishedName attribute value.
+ * The first run will compile the value.  Removal is not forced but
+ * is normal operating system service at exit().  The life time for the
+ * compiled regular expression is unbounded.
+ */
+#ifndef DISTINGUISHEDNAME_RE
+#warning "No distinguishedName grammar defined as DISTINGUISHEDNAME_RE yet"
+#define DISTINGUISHEDNAME_RE ".*"
+#endif
+bool grammar_dn (char *dn) {
+	static bool done = false;
+	static regex_t re;
+	// Compile the regex if so desired
+	if (!done) {
+		assert (0 == regcomp (&re,
+				DISTINGUISHEDNAME_RE,
+				REG_EXTENDED | REG_NOSUB));
+		done = true;
+	}
+	// Use the regex that was previously compiled
+	return 0 == regexec (&re, dn, 0, NULL, 0);
+}
+
+
+
 /********** ALLOCATION AND FREEING **********/
 
 
@@ -1099,8 +1148,6 @@ void pulleyback_close (void *pbh) {
  * Return 1 on success and 0 on failure, including when no
  * transaction is successfully open or when input data violates our
  * assumptions.
- *
- * #TODO# Would be useful to scan the grammar here.
  */
 static int _int_pb_addnotdel (bool add_not_del,
 				struct lcenv *lce, struct fork *fd) {
@@ -1127,7 +1174,9 @@ static int _int_pb_addnotdel (bool add_not_del,
 	// Verify the absense of inner NUL characters
 	success = success && (memchr ( dnstr, '\0',  dnlen) == NULL);
 	success = success && (memchr (lcsstr, '\0', lcslen) != NULL);
-	//TODO// Use libregex to validate the grammar of the lifecycleState
+	// Validate the grammar of the distinguishedName and lifecycleState
+	success = success && grammar_dn      ( dnstr);
+	success = success && grammar_lcstate (lcsstr);
 	// In case of failure, stop now and make no changes
 	if (!success) {
 		return 0;

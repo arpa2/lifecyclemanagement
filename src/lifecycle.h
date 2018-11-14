@@ -125,6 +125,49 @@ struct lcenv {
 #define LCE_ABORTED 0x00000001
 
 
+// Grammar for lifecycleState in Extended Regular Expression form
+//
+#define IDENTIFIER_RE	"[a-zA-Z-_]+[0-9]*"
+#define TIMESTAMP_RE	"[0-9]+"
+#define VALUE_RE	"[^ .]*"
+//
+#define LIFECYCLE_RE	IDENTIFIER_RE
+#define EVENT_RE	IDENTIFIER_RE
+#define VARIABLE_RE	IDENTIFIER_RE
+//
+#define NEXT_RE		EVENT_RE "[@]" TIMESTAMP_RE "|" \
+			LIFECYCLE_RE "[?]" EVENT_RE
+#define DONE_RE		NEXT_RE "|" \
+			VARIABLE_RE "=" VALUE_RE
+#define TO_DO_RE	DONE_RE "|" \
+			EVENT_RE "[@]" "|" \
+			VARIABLE_RE "[=]"
+//
+#define LIFECYCLESTATE_RE \
+			"(" LIFECYCLE_RE "([ ]" DONE_RE ")*" \
+			    "[ ]" NEXT_RE "([ ]" TO_DO_RE ")*" \
+			"|" LIFECYCLE_RE "([ ]" DONE_RE ")+" "[.]" \
+			")"
 
-//TODO// REGEX GRAMMAR FOR LIFECYCLESTATE (AND, MAYBE, DISTINGUISHEDNAME)
+
+// Grammar for distiguishedName in Extended Regular Expression form
+//
+#define KEYSTRING_RE	"[A-Za-z][A-Za-z0-9-]*"
+#define OID_RE		"[1-9][0-9]*([.][1-9][0-9]*)*"
+//
+#define ATRTYPE_NAME_RE	KEYSTRING_RE
+#define ATRTYPE_OID_RE	OID_RE
+#define ATRTYPE_RE	"(" ATRTYPE_NAME_RE "|" ATRTYPE_OID_RE ")"
+//
+// RFC 4514 is much pickier than this
+#define ATRVAL_RE	"([^,+]*|[\"][^,+\"]*[\"])"
+//
+#define ATTRTYPEVAL_RE	ATRTYPE_RE "[=]" ATRVAL_RE
+//
+#define RDN_RE		ATTRTYPEVAL_RE "([+]" ATTRTYPEVAL_RE ")*"
+//
+// RFC 4514 allows empty RDNSequences, printed as an empty string -- ignored
+#define DISTINGUISHEDNAME_RE \
+			RDN_RE "([,]" RDN_RE ")*"
+
 
