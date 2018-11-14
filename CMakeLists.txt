@@ -28,6 +28,9 @@ else()
         message (FATAL_ERROR "ARPA2CM is required.")
 endif()
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 include (MacroEnsureOutOfSourceBuild)
 include (MacroAddUninstallTarget)
 include (MacroGitVersionInfo)

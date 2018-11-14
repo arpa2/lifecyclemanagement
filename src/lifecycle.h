@@ -91,13 +91,27 @@ struct lcdriver {
 // resets to NULL.  From this time on, transaction updates will
 // fail consistently.
 //
+// pth_service is the service thread dedicated to this lcenv.
+// pth_sigpost is the wait condition / signal post to inform it
+// of a successful commit.  pth_envown is used to decide on who
+// owns the lcobject and lcservice data underneath, as well as
+// generally controls (most of) the lcenv object.
+//
+// lce_flags holds a number of flags about the lcenv:
+//  - LCE_ABORTED indicates an aborted transaction
+//
 // LDAP environments are single-threaded, so re-entry is unsafe.
 //
 struct lcenv {
-	struct lcobject *lco_first;
-	struct lcenv    *env_txncycle;
-	int              cnt_cmds;
-	struct lcdriver  lcd_cmds [1];
+	pthread_mutex_t  pth_envown;	// lcobject/lcstat ownership?
+	pthread_cond_t   pth_sigpost;	// signal from pulley, wait by service
+	pthread_t        pth_service;	// this lcenv's service thread
+	struct lcobject *lco_first;	// rd/wr only under pth_envown
+	struct lcenv    *env_txncycle;	// owned by pulley backend
+	uint32_t         lce_flags;	// owned by pulley backend
+	uint32_t         cnt_cmds;	// only written before service
+	struct lcdriver  lcd_cmds [1];	// only written before service
 };
 
+#define LCE_ABORTED 0x00000001
 

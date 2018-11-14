@@ -12,6 +12,8 @@
 #include <syslog.h>
 #include <errno.h>
 
+#include <pthread.h>
+
 
 //TODO// Include pulleyback.h locally (for now)
 #include "pulleyback.h"
@@ -458,9 +460,51 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
  *
  * The Mutex in the lcenv is claimed during transaction start, and
  * released after transaction end, good or bad.
- *
- * #TODO# No LDAP and no output; how to handle the Mutex?
  */
+
+
+/* Threads synchronise as follows:
+ *
+ *  0. The threads consist of a pulley backend and individual service
+ *     threads that each handle an lcenv with its subordinate lcobject
+ *     and lcstate data.
+ *  1. Before doing anything, a new thread into PTHREAD_CANCEL_DEFERRED,
+ *     intent on handling cancellation only while waiting more work;
+ *  2. During interactions with programs, PTHREAD_CANCEL_DISABLE is used,
+ *     to avoid deferred interrupts from overtaking half-done work.
+ *  3. The service thread normally sits waiting for a condition, which is
+ *     that new work has arrived.  A signal is sent by any txn_done(),
+ *     and spurious signals should also not wreak more heavoc than making
+ *     another run.  While waiting for this signal, PTHREAD_CANCEL_DEFERRED
+ *     would be handled immediately.
+ *  4. Upon receiving the signal, a complete run through the system is
+ *     made.  This is when PTHREAD_CANCEL_DISABLE is active, and it is
+ *     reliquished as soon as the run is over, or perhaps briefly before
+ *     a new pass is going to be made (which would be collaborative).
+ *  5. When a timer has been set, the condition wait is embellished with
+ *     its expiration time.  This is another trigger that could lead to
+ *     a spark of activity in the service thread, though specific to the
+ *     findings during the previous loop run.  The signal indicates whether
+ *     other things might also have changed.
+ *  6. The service thread and pulley backend share a mutex, which protects
+ *     the condition, but also serves to decide who may make changes to the
+ *     lcenv and any lcobject and lcstate underneath.  Note that this is a
+ *     strict hierarchy, without sharing between threads.  Between txn_open()
+ *     and either txn_break() or txn_done(), the mutex is held by the
+ *     transaction.  After a preliminary txn_break() the mutex is already
+ *     gone, and no signal sent, but pulley may still believe it is using a
+ *     transaction.  Since no further changes are made, this is fine.
+ */
+
+void *service_main (void *ctx) {
+	struct lcenv *lce = (struct lcenv *) ctx;
+	assert (lce != NULL);
+	int _oldtype;
+	assert (!pthread_setcanceltype (PTHREAD_CANCEL_DEFERRED, &_oldtype));
+	//TODO//MAIN_LOOP_LOGIC//OUTPUT_DRIVING//
+	pthread_exit (NULL);
+	return NULL;
+}
 
 
 
@@ -468,19 +512,56 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
 
 
 
-/* Test if a transaction is active on the lcenv.
+/* Test if an internal transaction is active on the lcenv.
+ * This is independent of what the Pulley Backend communicates;
+ * Additionals and removals by Pulley silently create a new
+ * transaction, but failure of an lcenv is shown by txn_isaborted()
+ * to stop that and linger until pulleyback_rollback() or a falsely
+ * informed pulleyback_commit() is sent.
  */
 bool txn_isactive (struct lcenv *lce) {
 	return lce->env_txncycle != NULL;
 }
 
 
-/* Open a fresh transaction.
- *
- * #TODO# Await Mutex for exclusive access by transaction
+/* Test if an internal transaction has aborted.  This should be
+ * mutual exclusive with txn_isactive().
+ */
+bool txn_isaborted (struct lcenv *lce) {
+	return 0 != (lce->lce_flags & LCE_ABORTED);
+}
+
+
+/* Raise the aborted flag on an internal transaction.
+ */
+void txn_isaborted_set (struct lcenv *lce) {
+	assert (!txn_isactive (lce));
+	lce->lce_flags |= LCE_ABORTED;
+}
+
+
+/* Clear the aborted flag on an internal transaction.
+ */
+void txn_isaborted_clr (struct lcenv *lce) {
+	assert (!txn_isactive (lce));
+	lce->lce_flags &= ~LCE_ABORTED;
+}
+
+
+/* Open a fresh transaction.  This is an internal transaction,
+ * which initiates when needed for data changes.  It may end
+ * before the last change has come through, namely in the case
+ * of errors.  The txn_isaborted() is then set in the lcenv to
+ * inform later attempts by Pulley to finish the transaction.
+ * The service thread is locked out from the data structures
+ * between txn_open() and txn_done() or txn_break().
  */
 void txn_open (struct lcenv *lce) {
-	assert (! txn_isactive (lce));
+	assert (! txn_isactive  (lce));
+	assert (! txn_isaborted (lce));
+	// Obtain ownership of this lcenv
+	assert (!pthread_mutex_lock (&lce->pth_envown));
+	// Create the smallest transaction cycle, containing just us
 	lce->env_txncycle = lce;
 	// Setup each lcobject for attribute changes
 	struct lcobject *lco = lce->lco_first;
@@ -494,15 +575,20 @@ void txn_open (struct lcenv *lce) {
 
 
 /* Break a transaction.  This recovers old state and disables any
- * further activity.
- *
- * #TODO# Release Mutex claimed by transaction, no pthread_cond_signal()
+ * further activity.  This may occur before Pulley knows about it,
+ * namely when an error is detected.  This is indicated through
+ * txn_isaborted() for the lcenv after txn_break().  After setting
+ * this flag, the service thread is allowed to run again, handle
+ * its timers and so on.
  */
 void txn_break (struct lcenv *lce) {
 	assert (txn_isactive (lce));
 	struct lcenv *txnext;
+	// Iterate over the transactional cycle, breaking all
 	while (txnext = lce->env_txncycle, txnext != NULL) {
+		// Break the transactional cycle in this lcenv
 		lce->env_txncycle = NULL;
+		// Undo the changes in all lcobject of this lcenv
 		struct lcobject *lco = lce->lco_first;
 		while (lco != NULL) {
 			struct lcstate *lcs = lco->lcs_toadd;
@@ -515,22 +601,27 @@ void txn_break (struct lcenv *lce) {
 			lco->lcs_todel = NULL;
 			lco = lco->lco_next;
 		}
+		// Communicate failure through the pulley backend
+		txn_isaborted_set (lce);
+		// Release the ownership hold on this lcenv
+		assert (!pthread_mutex_unlock (&lce->pth_envown));
+		// Move to the next lcenv in the transaction cycle, if any
 		lce = txnext;
 	}
 }
 
 
-
 /* The current transaction is done.
  * Delete what was setup for deletion, add what was prepared.
- *
- * #TODO# Release Mutex claimed by transaction + pthread_cond_signal()
  */
 void txn_done (struct lcenv *lce) {
 	assert (txn_isactive (lce));
 	struct lcenv *txnext;
+	// Iterate over the transactional cycle, committing all
 	while (txnext = lce->env_txncycle, txnext != NULL) {
+		// Break the transactional cycle in this lcenv
 		lce->env_txncycle = NULL;
+		// Commmit the changes in all lcobject of this lcenv
 		struct lcobject **plco = & lce->lco_first;
 		while (*plco != NULL) {
 			struct lcobject *lco = *plco;
@@ -551,6 +642,11 @@ void txn_done (struct lcenv *lce) {
 				plco = & lco->lco_next;
 			}
 		}
+		// Communicate success to the service thread
+		assert (!pthread_cond_signal (&lce->pth_sigpost));
+		// Release the ownership hold on this lcenv
+		assert (!pthread_mutex_unlock (&lce->pth_envown));
+		// Move to the next lcenv in the transaction cycle, if any
 		lce = txnext;
 	}
 }
@@ -590,8 +686,6 @@ struct {
  * The number of variables must be 2, for DN and lcstate.
  *
  * The handle returned is an lcenv pointer.
- *
- * #TODO# Create a thread to handle timeouts and live in lcenv.
  */
 void *pulleyback_open (int argc, char **argv, int varc) {
 	if ((argc < 2) || (varc != 2)) {
@@ -632,6 +726,11 @@ void *pulleyback_open (int argc, char **argv, int varc) {
 		}
 		lcd++;
 	}
+	// Prepare mutex and wait condition, then start the service thread
+	assert (!pthread_mutex_init (&lce->pth_envown,  NULL));
+	assert (!pthread_cond_init  (&lce->pth_sigpost, NULL));
+	assert (!pthread_create     (&lce->pth_service, NULL,
+	                            service_main, (void *) lce));
 	// Return the result
 done:
 	if (bad > 0) {
@@ -645,8 +744,6 @@ done:
 
 
 /* Close a PulleyBack for Life Cycle Management.
- *
- * #TODO# Shutdown the thread living in the lcenv structure.
  */
 void pulleyback_close (void *pbh) {
 	struct lcenv *lce = (struct lcenv *) pbh;
@@ -654,6 +751,12 @@ void pulleyback_close (void *pbh) {
 	if (txn_isactive (lce)) {
 		txn_break (lce);
 	}
+	// Stop the service thread and cleanup wait condition and mutex
+	void *exitval;
+	assert (!pthread_cancel        (lce->pth_service));
+	assert (!pthread_join          (lce->pth_service, &exitval));
+	assert (!pthread_cond_destroy  (&lce->pth_sigpost));
+	assert (!pthread_mutex_destroy (&lce->pth_envown));
 	// All lcobjects and lcstates will now be cleaned up
 	struct lcobject *lco = lce->lco_first;
 	while (lco != NULL) {
@@ -662,7 +765,7 @@ void pulleyback_close (void *pbh) {
 		lco = lcn;
 	}
 	// Cleanup lcdriver entries, inasfar as they are present:
-	int argi = 0;
+	uint32_t argi = 0;
 	struct lcdriver *lcd = &lce->lcd_cmds [0];
 	while (argi++ < lce->cnt_cmds) {
 		if (lcd->cmdpipe != NULL) {
@@ -682,12 +785,17 @@ void pulleyback_close (void *pbh) {
 }
 
 
-/* INTERNAL FUNCTION:
+/* Internal Function:
  *
  * Add or delete an entry in the current transaction, if one is open.
  * This internal function is run by the pulleyback_add and pulleyback_del
  * functions, because they are so similar.  The variable add_not_del
  * distinguishes on details.
+ *
+ * This function silently starts an internal transaction when none is
+ * active yet.  The exception is when txn_isaborted() is set in the lcenv
+ * to indicate that the current transaction has failed and the internal
+ * transaction was txn_abort()ed on account of that.
  *
  * Return 1 on success and 0 on failure, including when no
  * transaction is successfully open or when input data violates our
@@ -699,14 +807,22 @@ struct fork {
 };
 static int _int_pb_addnotdel (bool add_not_del,
 				struct lcenv *lce, struct fork *fd) {
-	bool success = txn_isactive (lce);
+	// Continue the failure of preceding actions (and bypass activity)
+	bool success = !txn_isaborted (lce);
+	// Silently open an internal transaction if needed
+	if (success && !txn_isactive (lce)) {
+		txn_open (lce);
+	}
+	// Parse single DER attributes into ptr,len values
 	char  *dnptr, *lcsptr;
 	size_t dnlen,  lcslen;
 	success = success && parse_der (fd->dn,  &dnptr,  &dnlen );
 	success = success && parse_der (fd->lcs, &lcsptr, &lcslen);
+	// In case of failure, stop now and make no changes
 	if (!success) {
 		return 0;
 	}
+	// Try to locate the lcobject to work on -- NULL if not found
 	struct lcobject *lco = find_lcobject (lce->lco_first, dnptr, dnlen);
 	struct lcstate **plcs = NULL;
 	if (lco != NULL) {
@@ -714,6 +830,7 @@ static int _int_pb_addnotdel (bool add_not_del,
 		                         lco->lcs_todel,
 		                         lcsptr, lcslen);
 	}
+	// Split activity into addition and deletion
 	if (add_not_del) {
 		// While adding, we may have to add an lcobject for a DN
 		if (lco == NULL) {
@@ -745,9 +862,11 @@ static int _int_pb_addnotdel (bool add_not_del,
 			*plcs = lcs;
 		}
 	}
+	// Rollback the internal transaction if we failed
 	if (!success) {
 		txn_break (lce);
 	}
+	// Communicate to the Pulley Backend if we succeeded
 	return success ? 1 : 0;
 }
 
@@ -794,7 +913,10 @@ int pulleyback_reset (void *pbh) {
 }
 
 
-/* Test if the current transaction would succeed.
+/* Test if the current transaction would succeed.  This does not always
+ * meant that a transaction is active; empty transactions succeed quite
+ * easily.
+ *
  * This is an elementary test if the transaction has broken internally.
  * The potential of this optional function is that two-phase commit
  * can be used, thus allowing safe collaborations with other transactional
@@ -803,7 +925,8 @@ int pulleyback_reset (void *pbh) {
  */
 int pulleyback_prepare   (void *pbh) {
 	struct lcenv *lce = (struct lcenv *) pbh;
-	return txn_isactive (lce) ? 1 : 0;
+	// Only read txn_isaborted(); it is cleaned up in the decision
+	return txn_isaborted (lce) ? 0 : 1;
 }
 
 
@@ -812,12 +935,18 @@ int pulleyback_prepare   (void *pbh) {
  */
 int pulleyback_commit    (void *pbh) {
 	struct lcenv *lce = (struct lcenv *) pbh;
-	if (!txn_isactive (lce)) {
+	if (txn_isaborted (lce)) {
 		// Caller had better used used pulleyback_prepare()
+		txn_isaborted_clr (lce);
 		return 0;
+	} else if (txn_isactive (lce)) {
+		// Commit changes and return the result
+		txn_done (lce);
+		return 1;
+	} else {
+		// Trivial, nothing has been done
+		return 1;
 	}
-	txn_done (lce);
-	return 1;
 }
 
 
@@ -828,9 +957,12 @@ int pulleyback_commit    (void *pbh) {
  */
 void pulleyback_rollback (void *pbh) {
 	struct lcenv *lce = (struct lcenv *) pbh;
+	// Stop any transaction that may be active
 	if (txn_isactive (lce)) {
 		txn_break (lce);
 	}
+	// Suppress the txn_isaborted() flag that should now be raised
+	txn_isaborted_clr (lce);
 }
 
 
@@ -840,6 +972,8 @@ void pulleyback_rollback (void *pbh) {
 int pulleyback_collaborate (void *pbh1, void *pbh2) {
 	struct lcenv *lce1 = (struct lcenv *) pbh1;
 	struct lcenv *lce2 = (struct lcenv *) pbh2;
+	assert (txn_isactive (lce1));
+	assert (txn_isactive (lce2));
 	if (txn_isactive (lce1)) {
 		if (txn_isactive (lce2)) {
 			// both transactions live, so merge their cycles

@@ -14,6 +14,7 @@ set(lifecycle_SRC
 )
 
 add_library (pulleyback_lifecycle SHARED ${lifecycle_SRC})
+target_link_libraries (pulleyback_lifecycle Threads::Threads)
 
 install (TARGETS pulleyback_lifecycle
 	LIBRARY DESTINATION /usr/share/steamworks/pulleyback)
