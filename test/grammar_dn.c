@@ -10,7 +10,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-#include "../src/lifecycle.h"
+#include "lifecycle.h"
 
 
 bool grammar_dn (char *dn);

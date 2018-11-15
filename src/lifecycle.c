@@ -301,8 +301,8 @@ struct lcstate **find_lcstate_ptr (struct lcstate **first,
  */
 #ifdef DEBUG
 void debug_lcstate (struct lcstate *lcs) {
-	debug (" | +---> lifecycleState: %s", lcs->txt_attr);
-	debug (" | |     ofs_next=%d tim_next=%d cnt_missed=%d", lcs->ofs_next, lcs->tim_next, lcs->cnt_missed);
+	debug (" | +-----> lifecycleState: %s", lcs->txt_attr);
+	debug (" | |       ofs_next=%d tim_next=%d cnt_missed=%d", lcs->ofs_next, lcs->tim_next, lcs->cnt_missed);
 }
 #endif
 
@@ -357,8 +357,8 @@ struct lcobject *find_lcobject (struct lcobject *lco_dnhash,
  */
 #ifdef DEBUG
 void debug_lcobject (struct lcobject *lco) {
-	debug (" +-+-> dn: %s", lco->txt_dn);
-	debug (" | |   tim_first=%d", lco->tim_first);
+	debug (" +-+---> dn: %s", lco->txt_dn);
+	debug (" | |     tim_first=%d", lco->tim_first);
 	struct lcstate *lcs = lco->lcs_first;
 	while (lcs != NULL) {
 		debug_lcstate (lcs);
@@ -952,7 +952,15 @@ void txn_isaborted_clr (struct lcenv *lce) {
  */
 #ifdef DEBUG
 void debug_lcenv (struct lcenv *lce) {
-	debug ("---> txn_isactive=%d, txn_isaborted=%d", txn_isactive (lce), txn_isaborted (lce));
+	int cyclen = 0;
+	if (lce->env_txncycle != NULL) {
+		struct lcenv *lce2 = lce;
+		do {
+			cyclen++;
+			lce2 = lce2->env_txncycle;
+		} while (lce2 != lce);
+	}
+	debug ("-+---> txn_isactive=%d, txn_isaborted=%d, txn_cyclen=%d", txn_isactive (lce), txn_isaborted (lce), cyclen);
 	struct lcobject *lco = lce->lco_first;
 	while (lco != NULL) {
 		debug_lcobject (lco);
@@ -985,6 +993,8 @@ void txn_open (struct lcenv *lce) {
 		lco->lcs_toadd = lco->lcs_first;
 		lco = lco->lco_next;
 	}
+	debug ("Transaction opened:");
+	debug_lcenv (lce);
 }
 
 
@@ -1022,6 +1032,8 @@ void txn_break (struct lcenv *lce) {
 		// Move to the next lcenv in the transaction cycle, if any
 		lce = txnext;
 	}
+	debug ("Transaction broken:");
+	debug_lcenv (lce);
 }
 
 
@@ -1064,6 +1076,8 @@ void txn_done (struct lcenv *lce) {
 		// Move to the next lcenv in the transaction cycle, if any
 		lce = txnext;
 	}
+	debug ("Transaction succeeded:");
+	debug_lcenv (lce);
 }
 
 
@@ -1221,11 +1235,16 @@ void pulleyback_close (void *pbh) {
 static int _int_pb_addnotdel (bool add_not_del,
 				struct lcenv *lce, struct fork *fd) {
 	// Continue the failure of preceding actions (and bypass activity)
-	bool success = !txn_isaborted (lce);
+	if (txn_isaborted (lce)) {
+		// Stop right now if the transaction already aborted
+		return 0;
+	}
 	// Silently open an internal transaction if needed
-	if (success && !txn_isactive (lce)) {
+	if (!txn_isactive (lce)) {
 		txn_open (lce);
 	}
+	// We now have an active, non-aborted transaction
+	bool success = true;
 	// Parse single DER attributes into ptr,len values
 	char  *dnptr =  dnptr;
 	char *lcsptr = lcsptr;
@@ -1240,14 +1259,19 @@ static int _int_pb_addnotdel (bool add_not_del,
 	memcpy (lcsstr, lcsptr, lcslen);
 	dnstr  [dnlen ] = '\0';
 	lcsstr [lcslen] = '\0';
+	debug ("distinguishedName: %s",  dnstr);
+	debug ("lifecycleState:    %s", lcsstr);
 	// Verify the absense of inner NUL characters
 	success = success && (memchr ( dnstr, '\0',  dnlen) == NULL);
-	success = success && (memchr (lcsstr, '\0', lcslen) != NULL);
+	success = success && (memchr (lcsstr, '\0', lcslen) == NULL);
 	// Validate the grammar of the distinguishedName and lifecycleState
 	success = success && grammar_dn      ( dnstr);
 	success = success && grammar_lcstate (lcsstr);
 	// In case of failure, stop now and make no changes
 	if (!success) {
+		debug ("Failed to add or delete an attribute");
+		// The transaction is open, so we must break it
+		txn_break (lce);
 		return 0;
 	}
 	// Try to locate the lcobject to work on -- NULL if not found
@@ -1262,13 +1286,17 @@ static int _int_pb_addnotdel (bool add_not_del,
 	if (add_not_del) {
 		// While adding, we may have to add an lcobject for a DN
 		if (lco == NULL) {
+			debug ("Addition without lcobject, will add it");
 			lco = new_lcobject (dnstr, dnlen);
 			lco->lco_next = lce->lco_first;
 			lce->lco_first = lco;
 			HASH_ADD (hsh_dn, lce->lco_dnhash, txt_dn, dnlen, lco);
+			debug_lcenv (lce);
 		}
 		// While adding, we may have to add an lcstate for an LCS
-		if (plcs == NULL) {
+		success = success && (plcs == NULL);
+		if (success) {
+			debug ("Addition without lifecycleState, will add it");
 			struct lcstate *lcs;
 			lcs = new_lcstate (lco, lcsstr, lcslen);
 			lcs->lcs_next = lco->lcs_toadd;
@@ -1278,6 +1306,7 @@ static int _int_pb_addnotdel (bool add_not_del,
 		// While deleting, we require all data to pre-exist
 		success = success && (lco != NULL) && (plcs != NULL);
 		if (success) {
+			debug ("Deleting with lcobject and lcstate found");
 			// Cut out the found lcstate (which ends in lcs)
 			struct lcstate *lcs = *plcs;
 			*plcs = lcs->lcs_next;
@@ -1401,24 +1430,24 @@ void pulleyback_rollback (void *pbh) {
 int pulleyback_collaborate (void *pbh1, void *pbh2) {
 	struct lcenv *lce1 = (struct lcenv *) pbh1;
 	struct lcenv *lce2 = (struct lcenv *) pbh2;
-	assert (txn_isactive (lce1));
-	assert (txn_isactive (lce2));
+	assert (txn_isactive (lce1) || txn_isaborted (lce1));
+	assert (txn_isactive (lce2) || txn_isaborted (lce2));
 	if (txn_isaborted (lce1)) {
 		if (txn_isaborted (lce2)) {
-			// both transactions broke down, trivially accept
+			debug ("Broken txn #1 and #2, trivial to collaborate");
 			return 1;
 		} else {
-			// lce1 broke down, so lce2 should also be broken
+			debug ("Broken txn #1, breaking #2 to collaborate");
 			txn_break (lce2);
 			return 1;
 		}
 	} else {
 		if (txn_isaborted (lce2)) {
-			// lce2 broke down, so lce1 should also be broken
+			debug ("Broken txn #2, breaking #1 to collaborate");
 			txn_break (lce1);
 			return 1;
 		} else {
-			// both transactions live, so merge their cycles
+			debug ("Merging txn #1 and #2 to collaborate");
 			struct lcenv *one1 = lce1->env_txncycle;
 			struct lcenv *one2 = lce2->env_txncycle;
 			struct lcenv *two1 = one1->env_txncycle;

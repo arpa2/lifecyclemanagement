@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../src/lifecycle.h"
+#include "lifecycle.h"
 
 
 struct lcstate *new_lcstate (struct lcobject *lco, char *lcs, size_t lcslen);
