@@ -15,7 +15,6 @@
 
 void debug_lcenv (struct lcenv *lce);
 void debug_lcobject (struct lcobject *lco);
-void debug_lcstate (struct lcstate *lcs);
 
 
 int main (int argc, char **argv) {

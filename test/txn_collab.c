@@ -13,7 +13,6 @@
 
 void debug_lcenv (struct lcenv *lce);
 void debug_lcobject (struct lcobject *lco);
-void debug_lcstate (struct lcstate *lcs);
 
 
 // test1: lce1,lce2 each have 1 attr. they collaborate. break lce2.

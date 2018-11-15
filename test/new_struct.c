@@ -11,7 +11,7 @@
 
 
 struct lcstate *new_lcstate (struct lcobject *lco, char *lcs, size_t lcslen);
-void debug_lcstate (struct lcstate *lcs);
+void debug_lcstate (struct lcstate *lcs, char *what_to_do);
 
 struct lcobject *new_lcobject (char *dn, size_t dnlen);
 void debug_lcobject (struct lcobject *lco);
@@ -41,7 +41,7 @@ int main (int argc, char **argv) {
 	debug_lcobject (lco);
 	debug ("Creating and dumping lifecycleState");
 	struct lcstate *lcs = new_lcstate  (lco, s_lcs, strlen (s_lcs));
-	debug_lcstate (lcs);
+	debug_lcstate (lcs, NULL);
 	debug ("Dumping the lifecycleObject with added lifecycleState");
 	debug_lcobject (lco);
 	//TODO// freeing

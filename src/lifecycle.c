@@ -263,8 +263,8 @@ struct lcstate *new_lcstate (struct lcobject *lco, char *lcs, size_t lcslen) {
 	// tim_next is made "dirty" or 0 by calloc()
 	// We shall first go through update_lcstate_events() anyway
 	lco->tim_first = 0;
-	new->lcs_next = lco->lcs_first;
-	lco->lcs_first = new;
+	new->lcs_next = lco->lcs_toadd;
+	lco->lcs_toadd = new;
 	return new;
 }
 
@@ -300,8 +300,11 @@ struct lcstate **find_lcstate_ptr (struct lcstate **first,
 /* For debugging purposes, print lifecycleState.
  */
 #ifdef DEBUG
-void debug_lcstate (struct lcstate *lcs) {
-	debug (" | +-----> lifecycleState: %s", lcs->txt_attr);
+void debug_lcstate (struct lcstate *lcs, char *what_to_do) {
+	if (what_to_do == NULL) {
+		what_to_do = "";
+	}
+	debug (" | +-----> lifecycleState%s: %s", what_to_do, lcs->txt_attr);
 	debug (" | |       ofs_next=%d tim_next=%d cnt_missed=%d", lcs->ofs_next, lcs->tim_next, lcs->cnt_missed);
 }
 #endif
@@ -360,8 +363,21 @@ void debug_lcobject (struct lcobject *lco) {
 	debug (" +-+---> dn: %s", lco->txt_dn);
 	debug (" | |     tim_first=%d", lco->tim_first);
 	struct lcstate *lcs = lco->lcs_first;
+	char *what_to_do = NULL;
+	if (lco->lcs_todel != NULL) {
+		what_to_do = ";KEEP";
+	}
+	if (lco->lcs_toadd != NULL) {
+		lcs = lco->lcs_toadd;
+		what_to_do = ";ADD";
+	}
 	while (lcs != NULL) {
-		debug_lcstate (lcs);
+		if (lcs == lco->lcs_todel) {
+			what_to_do = ";DEL";
+		} else if (lcs == lco->lcs_first) {
+			what_to_do = ";KEEP";
+		}
+		debug_lcstate (lcs, what_to_do);
 		lcs = lcs->lcs_next;
 	}
 }
@@ -1297,10 +1313,7 @@ static int _int_pb_addnotdel (bool add_not_del,
 		success = success && (plcs == NULL);
 		if (success) {
 			debug ("Addition without lifecycleState, will add it");
-			struct lcstate *lcs;
-			lcs = new_lcstate (lco, lcsstr, lcslen);
-			lcs->lcs_next = lco->lcs_toadd;
-			lco->lcs_toadd = lcs;
+			new_lcstate (lco, lcsstr, lcslen);
 		}
 	} else {
 		// While deleting, we require all data to pre-exist
