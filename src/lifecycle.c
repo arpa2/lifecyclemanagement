@@ -113,9 +113,9 @@ static inline debug (char *fmt, ...) {
 size_t idlen (char *idstr) {
 	size_t rv = 0;
 	while (idstr [rv] != '\0') {
-		char c = idstr [rv++];
+		char c = idstr [rv];
 		if ((isalnum (c)) || (c == '-') || (c == '_')) {
-			continue;
+			rv++;
 		} else {
 			break;
 		}
@@ -882,17 +882,21 @@ void service_wait (struct lcenv *lce) {
 void *service_main (void *ctx) {
 	struct lcenv *lce = (struct lcenv *) ctx;
 	assert (lce != NULL);
-	int _oldtype;
+	int _oldtype, _oldstate;
 	// Only be cancelled at controlled points
 	assert (!pthread_setcanceltype (PTHREAD_CANCEL_DEFERRED, &_oldtype));
 	// We claim lcobject and lcstate access
 	assert (!pthread_mutex_lock (&lce->pth_envown));
 	// Enter the main loop of the service thread
 	while (true) {
+		// Disable deferred cancelation while printing
+		assert (!pthread_setcancelstate (PTHREAD_CANCEL_DISABLE, &_oldstate));
 		// Advance any events that can proceed right now
 		service_advance_events (lce);
 		// Update timers and find the first @timer to fire
 		service_update_timers (lce);
+		// Enable cancelation, and processing of deferred cancelation
+		assert (!pthread_setcancelstate (PTHREAD_CANCEL_ENABLE , &_oldstate));
 		// Wait for commit from Pulley, or optional timer expiration
 		service_wait (lce);
 	}
@@ -1167,6 +1171,7 @@ void pulleyback_close (void *pbh) {
 	assert (!pthread_cancel        (lce->pth_service));
 	assert (!pthread_join          (lce->pth_service, &exitval));
 	assert (!pthread_cond_destroy  (&lce->pth_sigpost));
+	assert (!pthread_mutex_unlock  (&lce->pth_envown));
 	assert (!pthread_mutex_destroy (&lce->pth_envown));
 	// All lcobjects and lcstates will now be cleaned up
 	struct lcobject *lco = lce->lco_first;

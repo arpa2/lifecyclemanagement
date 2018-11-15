@@ -57,6 +57,11 @@ endif()
 #
 # BUILDING
 #
+
+if (DEBUG)
+	add_compile_options (-O0 -ggdb3)
+endif ()
+
 add_subdirectory (src)
 add_subdirectory (test)
 

@@ -32,15 +32,17 @@ static void debug (char *fmt, ...) {
 
 
 int main (int argc, char **argv) {
+	argc = 0;
+	argv = NULL;
 	char *s_dn  = "uid=bakker%2bkoeken,dc=orvelte,dc=nep";
 	char *s_lcs = "pkix req@56 pubkey@123 . cert@ deprecate@ expire@";
+	debug ("Creating and dumping lifecycleObject");
 	struct lcobject *lco = new_lcobject (     s_dn,  strlen (s_dn ));
 	debug_lcobject (lco);
-	printf ("Created lifecycleObject for %s", s_dn);
+	debug ("Creating and dumping lifecycleState");
 	struct lcstate *lcs = new_lcstate  (lco, s_lcs, strlen (s_lcs));
-	debug ("Created lifecycleState for %s", s_lcs);
 	debug_lcstate (lcs);
-	debug ("Dumping the new object %s", s_dn);
+	debug ("Dumping the lifecycleObject with added lifecycleState");
 	debug_lcobject (lco);
 	//TODO// freeing
 }

@@ -6,13 +6,16 @@ if (DEBUG)
 endif()
 
 add_definitions(-Wall -Wextra -pedantic)
+include_directories(${CMAKE_SOURCE_DIR}/src)
 
 add_executable (grammar_lcs grammar_lcs.c)
 add_executable (grammar_dn  grammar_dn.c )
 add_executable (new_struct  new_struct.c )
+add_executable (open_close  open_close.c )
 target_link_libraries (grammar_lcs pulleyback_lifecycle)
 target_link_libraries (grammar_dn  pulleyback_lifecycle)
 target_link_libraries (new_struct  pulleyback_lifecycle)
+target_link_libraries (open_close  pulleyback_lifecycle)
 
 add_test (NAME stx-lcs-pkix-done
 	COMMAND grammar_lcs
@@ -43,3 +46,9 @@ add_test (NAME stx-dn-bakker-orvelte-nep
 
 add_test (NAME new-struct-lcs-lco COMMAND new_struct)
 
+add_test (NAME open-close-three-args
+	 COMMAND open_close
+		"x=tee /tmp/x.out"
+		"y=tee /tmp/y.out"
+		"z=tee /tmp/z.out"
+	)
