@@ -273,8 +273,7 @@ struct lcstate *new_lcstate (struct lcobject *lco, char *lcs, size_t lcslen) {
  */
 void free_lcstate (struct lcstate **lcs) {
 	assert ((*lcs)->lcs_next == NULL);
-	//TODO:NOTYET// free (*lcs);
-	debug ("Faking the freeing of *lcs %p", *lcs);
+	free (*lcs);
 	*lcs = NULL;
 }
 
@@ -306,7 +305,7 @@ void debug_lcstate (struct lcstate *lcs, char *what_to_do) {
 		what_to_do = "";
 	}
 	debug (" | +-----> lifecycleState%s: %s", what_to_do, lcs->txt_attr);
-	debug (" | |       ofs_next=%d tim_next=%d cnt_missed=%d ptr=%p", lcs->ofs_next, lcs->tim_next, lcs->cnt_missed, lcs);
+	debug (" | |       ofs_next=%d tim_next=%d cnt_missed=%d", lcs->ofs_next, lcs->tim_next, lcs->cnt_missed);
 }
 #endif
 
