@@ -273,7 +273,8 @@ struct lcstate *new_lcstate (struct lcobject *lco, char *lcs, size_t lcslen) {
  */
 void free_lcstate (struct lcstate **lcs) {
 	assert ((*lcs)->lcs_next == NULL);
-	free (*lcs);
+	//TODO:NOTYET// free (*lcs);
+	debug ("Faking the freeing of *lcs %p", *lcs);
 	*lcs = NULL;
 }
 
@@ -305,7 +306,7 @@ void debug_lcstate (struct lcstate *lcs, char *what_to_do) {
 		what_to_do = "";
 	}
 	debug (" | +-----> lifecycleState%s: %s", what_to_do, lcs->txt_attr);
-	debug (" | |       ofs_next=%d tim_next=%d cnt_missed=%d", lcs->ofs_next, lcs->tim_next, lcs->cnt_missed);
+	debug (" | |       ofs_next=%d tim_next=%d cnt_missed=%d ptr=%p", lcs->ofs_next, lcs->tim_next, lcs->cnt_missed, lcs);
 }
 #endif
 
@@ -335,6 +336,7 @@ void free_lcobject (struct lcobject **lco) {
 	lcs = (*lco)->lcs_first;
 	while (lcs != NULL) {
 		struct lcstate *lcn = lcs->lcs_next;
+		lcs->lcs_next = NULL;
 		free_lcstate (&lcs);
 		lcs = lcn;
 	}
@@ -639,19 +641,20 @@ bool fire_lcstate_events (struct lcstate *lcs, struct lcobject *lco) {
  *  0. The threads consist of a pulley backend and individual service
  *     threads that each handle an lcenv with its subordinate lcobject
  *     and lcstate data.
- *  1. Before doing anything, a new thread into PTHREAD_CANCEL_DEFERRED,
- *     intent on handling cancellation only while waiting more work;
- *  2. During interactions with programs, PTHREAD_CANCEL_DISABLE is used,
- *     to avoid deferred interrupts from overtaking half-done work.
+ *  1. The new thread will loop, each time checking if the LCE_SERVICED
+ *     is still set in lce_flags.  This is always done after waiting for
+ *     a condition signal or a timeout.
+ *  2. The main program never cancels the service thread, but resets the
+ *     flag and sends a condition signal while it knows the service
+ *     thread is waiting for it.
  *  3. The service thread normally sits waiting for a condition, which is
  *     that new work has arrived.  A signal is sent by any txn_done(),
  *     and spurious signals should also not wreak more heavoc than making
- *     another run.  While waiting for this signal, PTHREAD_CANCEL_DEFERRED
- *     would be handled immediately.
- *  4. Upon receiving the signal, a complete run through the system is
- *     made.  This is when PTHREAD_CANCEL_DISABLE is active, and it is
- *     reliquished as soon as the run is over, or perhaps briefly before
- *     a new pass is going to be made (which would be collaborative).
+ *     another run.  During the wait, changes to the LCE_SERVICED flag in
+ *     lce_flags might be made if the service thread needs to finish.
+ *  4. Upon receiving the condition singal, a complete run through the
+ *     logic is made.  This is another loop however, and it is skipped
+ *     when LCE_SERVICED is no longer set in lce_flags.
  *  5. When a timer has been set, the condition wait is embellished with
  *     its expiration time.  This is another trigger that could lead to
  *     a spark of activity in the service thread, though specific to the
@@ -686,8 +689,10 @@ void service_fire_timer (struct lcobject *lco, struct lcenv *lce) {
 	time_t timer = lco->tim_first;
 	bool fired_some_lcstate_timer = false;
 	struct lcstate *lcs = lco->lcs_first;
+	debug ("Looking for timer %d", timer);
 	while (lcs != NULL) {
 		// See if this lcstate wants to fire
+		debug ("Considering type '%c' timer %d", lcs->typ_next, lcs->tim_next);
 		if ((lcs->typ_next == '@') && (lcs->tim_next <= timer)) {
 			char  *lcname    = lcs->txt_attr;
 			size_t lcnamelen = idlen (lcname);
@@ -695,6 +700,7 @@ void service_fire_timer (struct lcobject *lco, struct lcenv *lce) {
 			struct lcdriver *lcd = lce->lcd_cmds;
 			uint32_t lcdnum      = lce->cnt_cmds;
 			while (lcdnum-- > 0) {
+				debug ("Testing lcdriver %s", lcname);
 				if (0 == strmemcmp (lcd->cmdname,
 						lcname, lcnamelen)) {
 					fprintf (lcd->cmdpipe, "%s\n%s\n",
@@ -814,6 +820,11 @@ refresh:
 			}
 			// Insert cur before *cmp (which may be NULL)
 			cur->lco_next = *cmp;
+			if (cmp == ptl) {
+				// Exceptional, insertion at the tail
+				// Avoid seeing the same object again
+				ptl = & cur->lco_next;
+			}
 			*cmp = cur;
 			// Unusual: keep ptl because *ptl has moved
 			continue;
@@ -829,7 +840,13 @@ refresh:
 	struct lcobject *lco = lce->lco_first;
 	while (newnow = time (NULL),
 			(lco != NULL) && (lco->tim_first <= newnow)) {
+		if (lco->tim_first == (time_t) -1) {
+			//TODO// Quick Hack.  We set -1 in this routine...?
+			debug ("TODO: Quick Hack -- we set -1 in tim_first, probably in this routine?!?");
+			break;
+		}
 		// Hurry!  We should already have done this!
+		debug ("service_fire_timer() called because lco->tim_first %d before newnow %d", lco->tim_first, newnow);
 		service_fire_timer (lco, lce);
 		// Rework the firing time; more lcstate may want to fire
 		update_lcobject_firetime (lco);
@@ -868,16 +885,19 @@ void service_wait (struct lcenv *lce) {
 		struct timespec abstime;  /* tv_sec, tv_nsec */
 		memset (&abstime, 0, sizeof (abstime));
 		abstime.tv_sec  = first_expiration;
+		debug ("Service thread: Upcoming wait ends at %d", first_expiration);
 		// Wait for a signal or reaching the absolute time
 		assert (!pthread_cond_timedwait (
 				&lce->pth_sigpost,
 				&lce->pth_envown,
 				&abstime));
+		debug ("Service thread: Wakeup caused by commit, timeout or request to finish");
 	} else {
 		// Wait for a signal but not for a certain time
 		assert (!pthread_cond_wait (
 				&lce->pth_sigpost,
 				&lce->pth_envown));
+		debug ("Service thread: Wakeup caused by commit or request to finish");
 	}
 }
 
@@ -898,28 +918,61 @@ void service_wait (struct lcenv *lce) {
 void *service_main (void *ctx) {
 	struct lcenv *lce = (struct lcenv *) ctx;
 	assert (lce != NULL);
-	int _oldtype, _oldstate;
-	// Only be cancelled at controlled points
-	assert (!pthread_setcanceltype (PTHREAD_CANCEL_DEFERRED, &_oldtype));
 	// We claim lcobject and lcstate access
 	assert (!pthread_mutex_lock (&lce->pth_envown));
+	debug ("Service thread: Started");
 	// Enter the main loop of the service thread
-	while (true) {
-		// Disable deferred cancelation while printing
-		assert (!pthread_setcancelstate (PTHREAD_CANCEL_DISABLE, &_oldstate));
+	while (lce->lce_flags & LCE_SERVICED) {
 		// Advance any events that can proceed right now
+		debug ("Service thread: Advancing lcname?evname events");
 		service_advance_events (lce);
 		// Update timers and find the first @timer to fire
+		debug ("Service thread: Updating timers");
 		service_update_timers (lce);
-		// Enable cancelation, and processing of deferred cancelation
-		assert (!pthread_setcancelstate (PTHREAD_CANCEL_ENABLE , &_oldstate));
 		// Wait for commit from Pulley, or optional timer expiration
+		debug ("Service thread: Waiting for commit (or timer expiration)");
 		service_wait (lce);
 	}
-	// The thread runs in the main loop until it is cancelled
-	// pthread_mutex_unlock (&lce->lce_envown);
-	// pthread_exit (NULL);
-	// return NULL;
+	// Free our mutex lock so the main thread can grab it back
+	debug ("Service thread: stopping");
+	pthread_mutex_unlock (&lce->pth_envown);
+	pthread_exit (NULL);
+	return NULL;
+}
+
+
+/* Start the service thread.
+ */
+void service_start (struct lcenv *lce) {
+	// Check and set the LCE_SERVICED flag to allow looping
+	assert ((lce->lce_flags & LCE_SERVICED) == 0);
+	lce->lce_flags |= LCE_SERVICED;
+	// Prepare mutex and wait condition, then create the service thread
+	assert (!pthread_mutex_init (&lce->pth_envown,  NULL));
+	assert (!pthread_cond_init  (&lce->pth_sigpost, NULL));
+	assert (!pthread_create     (&lce->pth_service, NULL,
+	                             service_main, (void *) lce));
+}
+
+
+/* Stop the service thread, and wait until it finishes.
+ */
+void service_stop (struct lcenv *lce) {
+	// Check and clear the LCE_SERVICED flag to end looping
+	assert ((lce->lce_flags & LCE_SERVICED) != 0);
+	lce->lce_flags &= ~LCE_SERVICED;
+	// Block the service thread at the end of the loop
+	assert (!pthread_mutex_lock (&lce->pth_envown));
+	debug ("Sending final signal to service thread");
+	assert (!pthread_cond_signal (&lce->pth_sigpost));
+	assert (!pthread_mutex_unlock (&lce->pth_envown));
+	// Stop the service thread and cleanup wait condition and mutex
+	void *exitval;
+	assert (!pthread_join (lce->pth_service, &exitval));
+	// Nobody is watching, so we can safely cleanup resources
+	assert (!pthread_cond_destroy  (&lce->pth_sigpost));
+	assert (!pthread_mutex_unlock  (&lce->pth_envown));
+	assert (!pthread_mutex_destroy (&lce->pth_envown));
 }
 
 
@@ -1031,9 +1084,12 @@ void txn_break (struct lcenv *lce) {
 		// Undo the changes in all lcobject of this lcenv
 		struct lcobject *lco = lce->lco_first;
 		while (lco != NULL) {
+			debug ("Removing in lcobject %s", lco->txt_dn);
 			struct lcstate *lcs = lco->lcs_toadd;
 			while (lcs != lco->lcs_first) {
+				debug ("Removing lcstate %s", lcs->txt_attr);
 				struct lcstate *next = lcs->lcs_next;
+				lcs->lcs_next = NULL;
 				free_lcstate (&lcs);
 				lcs = next;
 			}
@@ -1055,6 +1111,7 @@ void txn_break (struct lcenv *lce) {
 
 /* The current transaction is done.
  * Delete what was setup for deletion, add what was prepared.
+ *TODO* Not actually deleting, and not wiping _todel pointer
  */
 void txn_done (struct lcenv *lce) {
 	assert (txn_isactive (lce));
@@ -1067,18 +1124,26 @@ void txn_done (struct lcenv *lce) {
 		struct lcobject **plco = & lce->lco_first;
 		while (*plco != NULL) {
 			struct lcobject *lco = *plco;
-			struct lcstate **plcs = & lco->lcs_first;
+			struct lcstate **plcs = & lco->lcs_toadd;
 			struct lcstate *next;
-			while (next = *plcs, next != NULL) {
-				free_lcstate (plcs);
+			while (next = *plcs, next != lco->lcs_todel) {
 				plcs = & next->lcs_next;
+			}
+			*plcs = NULL;
+			while (next != NULL) {
+				struct lcstate *this = next;
+				next = this->lcs_next;
+				this->lcs_next = NULL;
+				free_lcstate (&this);
 			}
 			lco->lcs_first = lco->lcs_toadd;
 			lco->lcs_toadd = NULL;
+			lco->lcs_todel = NULL;
 			if (lco->lcs_first == NULL) {
 				// Empty object.  Cleanup and resample *plco
 				*plco = lco->lco_next;
 				HASH_DELETE (hsh_dn, lce->lco_dnhash, lco);
+				lco->lco_next = NULL;
 				free_lcobject (&lco);
 			} else {
 				// Proper object.  Continue to next *plco
@@ -1086,6 +1151,7 @@ void txn_done (struct lcenv *lce) {
 			}
 		}
 		// Communicate success to the service thread
+		debug ("Signaling the Service thread about the commit");
 		assert (!pthread_cond_signal (&lce->pth_sigpost));
 		// Release the ownership hold on this lcenv
 		assert (!pthread_mutex_unlock (&lce->pth_envown));
@@ -1171,11 +1237,8 @@ void *pulleyback_open (int argc, char **argv, int varc) {
 		}
 		lcd++;
 	}
-	// Prepare mutex and wait condition, then start the service thread
-	assert (!pthread_mutex_init (&lce->pth_envown,  NULL));
-	assert (!pthread_cond_init  (&lce->pth_sigpost, NULL));
-	assert (!pthread_create     (&lce->pth_service, NULL,
-	                             service_main, (void *) lce));
+	// Initialise and start the service thread
+	service_start (lce);
 	// Return the result
 done:
 	if (bad > 0) {
@@ -1196,18 +1259,14 @@ void pulleyback_close (void *pbh) {
 	if (txn_isactive (lce)) {
 		txn_break (lce);
 	}
-	// Stop the service thread and cleanup wait condition and mutex
-	void *exitval;
-	assert (!pthread_cancel        (lce->pth_service));
-	assert (!pthread_join          (lce->pth_service, &exitval));
-	assert (!pthread_cond_destroy  (&lce->pth_sigpost));
-	assert (!pthread_mutex_unlock  (&lce->pth_envown));
-	assert (!pthread_mutex_destroy (&lce->pth_envown));
+	// Ask the service thread to exit, and wait for it to happen
+	service_stop (lce);
 	// All lcobjects and lcstates will now be cleaned up
 	struct lcobject *lco = lce->lco_first;
 	while (lco != NULL) {
 		struct lcobject *lcn = lco->lco_next;
 		HASH_DELETE (hsh_dn, lce->lco_dnhash, lco);
+		lco->lco_next = NULL;
 		free_lcobject (&lco);
 		lco = lcn;
 	}
@@ -1314,22 +1373,29 @@ static int _int_pb_addnotdel (bool add_not_del,
 		if (success) {
 			debug ("Addition without lifecycleState, will add it");
 			new_lcstate (lco, lcsstr, lcslen);
+		} else {
+			debug ("Doubly added lifecycleState, rejecting");
 		}
 	} else {
 		// While deleting, we require all data to pre-exist
 		success = success && (lco != NULL) && (plcs != NULL);
 		if (success) {
-			debug ("Deleting with lcobject and lcstate found");
 			// Cut out the found lcstate (which ends in lcs)
 			struct lcstate *lcs = *plcs;
+			if (*plcs == lco->lcs_first) {
+				lco->lcs_first = lcs->lcs_next;
+			}
 			*plcs = lcs->lcs_next;
 			// Prefix the found lcstate (in lcs) to lcs_todel
-			plcs = & lco->lcs_first;
+			plcs = & lco->lcs_toadd;
 			while (*plcs != lco->lcs_todel) {
 				plcs = & (*plcs)->lcs_next;
 			}
 			lcs->lcs_next = *plcs;
-			lco->lcs_todel =
+			if (*plcs == lco->lcs_first) {
+				lco->lcs_first = lcs;
+			}
+			lco->lcs_todel = lcs;
 			*plcs = lcs;
 		}
 	}

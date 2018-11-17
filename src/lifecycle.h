@@ -74,9 +74,9 @@ struct lcobject {
 
 
 // Is there a POSIX-standard way of quoting the maximum time_t value?
-// The following assumes it is an unsigned type, which is reasonable.
+// The following assumes it is a signed type, so 32 bits go up to 2038.
 //
-#define MAX_TIME_T (~(time_t)0)
+#define MAX_TIME_T ((~(time_t)0)>>1)
 
 
 // An lcdriver or Life Cycle Driver is a command to be opened with popen()
@@ -109,6 +109,7 @@ struct lcdriver {
 //
 // lce_flags holds a number of flags about the lcenv:
 //  - LCE_ABORTED indicates an aborted transaction
+//  - LCE_SERVICED indicates that the service thread may continue
 //
 // LDAP environments are single-threaded, so re-entry is unsafe.
 //
@@ -124,7 +125,9 @@ struct lcenv {
 	struct lcdriver  lcd_cmds [1];	// only written before service
 };
 
-#define LCE_ABORTED 0x00000001
+#define LCE_ABORTED	0x00000001
+
+#define LCE_SERVICED	0x00000002
 
 
 // Grammar for lifecycleState in Extended Regular Expression form
