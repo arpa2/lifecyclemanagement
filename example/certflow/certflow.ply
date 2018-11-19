@@ -1,0 +1,15 @@
+# Certificate Flow -- PulleyScript to retrieve TLS host certificates
+#
+# See doc/CERTFLOW.MD for the sort of application.
+#
+# This script retrieves every lifecycleObject whose DN takes the form
+#   dc=,associatedDomain=,ou=KeyMaster,o=,ou=InternetWide
+# and delivers the containing lifecycelState fields.
+#
+# From: Rick van Rein <rick@openfortress.nl>
+
+
+ObjectClass:"lifecycleObject" + LifecycleState:lcs, @dn, DC=owner, AssociatedDomain=zone, OU="KeyMaster", O="arpa2.org", OU="InternetWide" <- world
+
+dn,lcs -> lifecycle (x509="a2lc_x509", acme="a2lc_acme", dane="a2lc_dane", tlspool="a2lc_tlspool")
+
