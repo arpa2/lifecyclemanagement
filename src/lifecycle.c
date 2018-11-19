@@ -55,7 +55,7 @@
 //TODO// Transition lco_first/_next to UT_hash iteration?
 #include "uthash.h"
 //TODO// Include pulleyback.h locally (for now)
-#include "pulleyback.h"
+#include <steamworks/pulleyback.h>
 #include "lifecycle.h"
 
 

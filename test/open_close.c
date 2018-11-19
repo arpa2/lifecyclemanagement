@@ -10,7 +10,7 @@
 #include <stdio.h>
 
 #include "lifecycle.h"
-#include "pulleyback.h"
+#include <steamworks/pulleyback.h>
 
 
 void debug_lcenv (struct lcenv *lce);

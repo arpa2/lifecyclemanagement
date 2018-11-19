@@ -7,9 +7,8 @@ endif()
 
 add_definitions(-Wall -Wextra -pedantic)
 
-#TODO# For now, including pulleyback.h locally (which is awful)
 set(lifecycle_SRC
-        lifecycle.c lifecycle.h pulleyback.h uthash.h
+        lifecycle.c lifecycle.h uthash.h
 )
 
 add_library (pulleyback_lifecycle SHARED ${lifecycle_SRC})

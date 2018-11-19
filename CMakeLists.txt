@@ -31,6 +31,9 @@ endif()
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+find_package(Steamworks REQUIRED)
+include_directories(${Steamworks_INCLUDE_DIRS})
+
 include (MacroEnsureOutOfSourceBuild)
 include (MacroAddUninstallTarget)
 include (MacroGitVersionInfo)
