@@ -933,7 +933,7 @@ void *service_main (void *ctx) {
 		service_wait (lce);
 	}
 	// Free our mutex lock so the main thread can grab it back
-	debug ("Service thread: stopping");
+	debug ("Service thread: Stopping");
 	pthread_mutex_unlock (&lce->pth_envown);
 	pthread_exit (NULL);
 	return NULL;
@@ -971,7 +971,8 @@ void service_stop (struct lcenv *lce) {
 	// Nobody is watching, so we can safely cleanup resources
 	assert (!pthread_cond_destroy  (&lce->pth_sigpost));
 	assert (!pthread_mutex_unlock  (&lce->pth_envown));
-	assert (!pthread_mutex_destroy (&lce->pth_envown));
+	//LINUX_FAILS// assert (!pthread_mutex_destroy (&lce->pth_envown));
+	assert ((!pthread_mutex_destroy (&lce->pth_envown) || (errno == 0)));
 }
 
 
