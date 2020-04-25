@@ -2,6 +2,8 @@
 # CMAKE SETUP
 #
 
+message(FATAL_ERROR "This repository has moved to GitLab\n\nGet the lifecycle pulleyback as part of\n\thttps://gitlab.com/arpa2/steamworks-pulleyback/\n")
+
 cmake_minimum_required (VERSION 3.1 FATAL_ERROR)
 project ("ARPA2 Life Cycle Management via LDAP")
 
